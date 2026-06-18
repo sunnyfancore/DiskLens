@@ -3146,12 +3146,22 @@ void MainWindow::SaveUiSettings() const {
 
 void MainWindow::RunAfterClickFeedback(const QString& stateText, const QString& detailText, std::function<void()> action) {
     if (!stateText.isEmpty()) {
-        SetInfoBar(
-            stateText,
-            latestResult_ ? latestResult_->fileCount : 0,
-            latestResult_ ? latestResult_->directoryCount : 0,
-            detailText);
-        FlushImmediateFeedback();
+        // 仅在磁盘分析页用全局信息栏反馈;搜索/清理页有自己的状态标签(searchScopeLabel_、
+        // cleanupStatusLabel_),写到这里会串到文件扫描的信息栏。
+        QWidget* currentPage = tabs_ != nullptr ? tabs_->currentWidget() : nullptr;
+        const bool onDiskAnalysisPage = currentPage == directoryView_
+            || currentPage == largeFilesView_
+            || currentPage == staleFilesView_
+            || currentPage == typeStatsTable_
+            || currentPage == duplicateTable_;
+        if (onDiskAnalysisPage) {
+            SetInfoBar(
+                stateText,
+                latestResult_ ? latestResult_->fileCount : 0,
+                latestResult_ ? latestResult_->directoryCount : 0,
+                detailText);
+            FlushImmediateFeedback();
+        }
     }
 
     QTimer::singleShot(16, this, [this, action = std::move(action)]() mutable {
@@ -6430,7 +6440,7 @@ void MainWindow::StartSystemSearchIndex() {
             }, Qt::QueuedConnection);
         }
 
-        QMetaObject::invokeMethod(this, [this, records, volumeStates, roots, usedFastIndex, indexedFiles, indexedDirectories]() {
+        QMetaObject::invokeMethod(this, [this, records, volumeStates, usedFastIndex]() {
             searchIndex_ = records;
             searchVolumeStates_ = volumeStates;
             searchIndexing_.store(false);
@@ -6441,11 +6451,6 @@ void MainWindow::StartSystemSearchIndex() {
                 searchScopeLabel_->setText(QStringLiteral("范围：%1 全量 %2 项").arg(usedFastIndex ? QStringLiteral("MFT 索引") : QStringLiteral("兼容索引")).arg(static_cast<qulonglong>(searchIndex_->size())));
             }
             PopulateSearchTable();
-            SetInfoBar(
-                usedFastIndex ? QStringLiteral("MFT 索引完成") : QStringLiteral("兼容索引完成"),
-                indexedFiles,
-                indexedDirectories,
-                QStringLiteral("索引可立即使用，缓存正在后台保存：%1").arg(roots.join(QStringLiteral(" "))));
         }, Qt::QueuedConnection);
 
         SaveSystemSearchIndexCacheSnapshot(*records, *volumeStates);
@@ -6545,13 +6550,6 @@ void MainWindow::LoadSystemSearchIndexCache() {
                             .arg(static_cast<qulonglong>(searchIndex_->size())));
                 }
                 PopulateSearchTable();
-                SetInfoBar(
-                    QStringLiteral("已加载搜索索引"),
-                    static_cast<std::uint64_t>(searchIndex_->size()),
-                    0,
-                    volumeStates->empty()
-                        ? QStringLiteral("已先加载旧缓存，正在后台升级为增量索引")
-                        : QStringLiteral("缓存已可用，正在后台校验 USN 增量变更"));
                 if (volumeStates->empty()) {
                     QTimer::singleShot(0, this, &MainWindow::StartSystemSearchIndex);
                 }
@@ -6593,7 +6591,6 @@ void MainWindow::LoadSystemSearchIndexCache() {
                         searchScopeLabel_->setText(QStringLiteral("范围：增量缓存 %1 项").arg(static_cast<qulonglong>(searchIndex_->size())));
                     }
                     PopulateSearchTable();
-                    SetInfoBar(QStringLiteral("已增量更新搜索索引"), static_cast<std::uint64_t>(searchIndex_->size()), 0, SearchIndexCacheFilePath());
                 }, Qt::QueuedConnection);
             } else {
                 QMetaObject::invokeMethod(this, [this]() {
