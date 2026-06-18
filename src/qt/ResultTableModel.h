@@ -62,6 +62,16 @@ struct ResultRow {
      * @brief 是否是返回上级行。
      */
     bool isParentRow = false;
+
+    /**
+     * @brief 修改时间展示文本（绝对日期，如 "2024-03-15"）。
+     */
+    QString modifiedText;
+
+    /**
+     * @brief 修改时间原始毫秒（Unix epoch），用于排序。
+     */
+    qint64 modifiedMsec = 0;
 };
 
 /**

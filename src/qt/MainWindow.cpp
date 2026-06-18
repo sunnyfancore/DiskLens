@@ -708,6 +708,18 @@ QString FormatDetailDateTime(const QDateTime& value) {
 }
 
 /**
+ * @brief 把 Unix epoch 毫秒格式化为表格用的绝对日期。
+ * @param msec Unix epoch 毫秒。
+ * @return "yyyy-MM-dd"；未知（≤0）时返回占位符。
+ */
+QString FormatModifiedDate(std::int64_t msec) {
+    if (msec <= 0) {
+        return QStringLiteral("—");
+    }
+    return QDateTime::fromMSecsSinceEpoch(msec).toString(QStringLiteral("yyyy-MM-dd"));
+}
+
+/**
  * @brief 将布尔状态格式化为中文文本。
  * @param value 布尔值。
  * @return 是或否。
@@ -1013,6 +1025,7 @@ void WriteScanNode(QDataStream& stream, const core::ScanNode& node) {
     stream << static_cast<quint32>(node.kind);
     stream << static_cast<quint64>(node.ownBytes);
     stream << static_cast<quint64>(node.totalBytes);
+    stream << static_cast<qint64>(node.lastModifiedMsec);
     stream << static_cast<quint32>(node.children.size());
 
     for (const auto& child : node.children) {
@@ -1025,7 +1038,7 @@ void WriteScanNode(QDataStream& stream, const core::ScanNode& node) {
  * @param stream 来源数据流。
  * @return 扫描节点。
  */
-std::unique_ptr<core::ScanNode> ReadScanNode(QDataStream& stream) {
+std::unique_ptr<core::ScanNode> ReadScanNode(QDataStream& stream, quint32 version) {
     auto node = std::make_unique<core::ScanNode>();
     node->name = ReadWideString(stream);
     node->path = ReadWideString(stream);
@@ -1034,7 +1047,14 @@ std::unique_ptr<core::ScanNode> ReadScanNode(QDataStream& stream) {
     quint64 ownBytes = 0;
     quint64 totalBytes = 0;
     quint32 childCount = 0;
-    stream >> kind >> ownBytes >> totalBytes >> childCount;
+    stream >> kind >> ownBytes >> totalBytes;
+    // v2 起新增最后修改时间字段；v1 缓存没有该字段，读默认 0。
+    if (version >= 2) {
+        qint64 lastModifiedMsec = 0;
+        stream >> lastModifiedMsec;
+        node->lastModifiedMsec = static_cast<std::int64_t>(lastModifiedMsec);
+    }
+    stream >> childCount;
 
     node->kind = static_cast<core::NodeKind>(kind);
     node->ownBytes = static_cast<std::uint64_t>(ownBytes);
@@ -1042,7 +1062,7 @@ std::unique_ptr<core::ScanNode> ReadScanNode(QDataStream& stream) {
     node->children.reserve(childCount);
 
     for (quint32 index = 0; index < childCount; ++index) {
-        node->children.push_back(ReadScanNode(stream));
+        node->children.push_back(ReadScanNode(stream, version));
     }
 
     return node;
@@ -1062,7 +1082,7 @@ void SaveScanCache(const core::ScanResult& result, bool usedNtfsMft) {
     QDataStream stream(&file);
     stream.setVersion(QDataStream::Qt_6_0);
     stream << static_cast<quint32>(0x4E444D43);
-    stream << static_cast<quint32>(1);
+    stream << static_cast<quint32>(2);
     stream << static_cast<quint8>(usedNtfsMft ? 1 : 0);
     stream << static_cast<quint64>(result.fileCount);
     stream << static_cast<quint64>(result.directoryCount);
@@ -1099,7 +1119,7 @@ std::unique_ptr<core::ScanResult> LoadScanCache(bool& usedNtfsMft) {
     quint32 version = 0;
     quint8 usedFlag = 0;
     stream >> magic >> version >> usedFlag;
-    if (magic != 0x4E444D43 || version != 1 || stream.status() != QDataStream::Ok) {
+    if (magic != 0x4E444D43 || (version != 1 && version != 2) || stream.status() != QDataStream::Ok) {
         return nullptr;
     }
 
@@ -1128,7 +1148,7 @@ std::unique_ptr<core::ScanResult> LoadScanCache(bool& usedNtfsMft) {
     quint8 hasRoot = 0;
     stream >> hasRoot;
     if (hasRoot != 0) {
-        result->root = ReadScanNode(stream);
+        result->root = ReadScanNode(stream, version);
     }
 
     if (stream.status() != QDataStream::Ok || !result->root) {
@@ -1766,6 +1786,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     directoryView_->setContextMenuPolicy(Qt::CustomContextMenu);
     directoryTable_->setContextMenuPolicy(Qt::CustomContextMenu);
     largeFilesView_->setContextMenuPolicy(Qt::CustomContextMenu);
+    staleFilesView_->setContextMenuPolicy(Qt::CustomContextMenu);
     typeStatsTable_->setContextMenuPolicy(Qt::CustomContextMenu);
     duplicateTable_->setContextMenuPolicy(Qt::CustomContextMenu);
     searchView_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1813,6 +1834,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         ActivateDirectoryTableRow();
     });
     connect(largeFilesView_, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
+        OpenSelectedPath();
+    });
+    connect(staleFilesView_, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
         OpenSelectedPath();
     });
     connect(duplicateTable_, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
@@ -1954,6 +1978,19 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         menu.addSeparator();
         menu.addAction(QStringLiteral("导出当前列表"), this, &MainWindow::ExportCurrentTable);
         menu.exec(largeFilesView_->viewport()->mapToGlobal(position));
+    });
+    connect(staleFilesView_, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
+        const QModelIndex index = staleFilesView_->indexAt(position);
+        if (index.isValid()) {
+            staleFilesView_->selectionModel()->select(index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        }
+        const ResultRow* row = staleFilesModel_ != nullptr ? staleFilesModel_->RowAt(staleFilesView_->currentIndex().row()) : nullptr;
+        const QString path = row != nullptr ? row->fullPath : QString();
+        QMenu menu(this);
+        AddPathActions(menu, path, false, row != nullptr ? row->bytes : 0, row != nullptr);
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("导出当前列表"), this, &MainWindow::ExportCurrentTable);
+        menu.exec(staleFilesView_->viewport()->mapToGlobal(position));
     });
     connect(typeStatsTable_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
         ShowTypeStatsContextMenu(position);
@@ -2859,6 +2896,8 @@ void MainWindow::SelectNodeDetails(const core::ScanNode& node) {
                 reinterpret_cast<quint64>(&node),
                 false,
                 false,
+                FormatModifiedDate(node.lastModifiedMsec),
+                node.lastModifiedMsec,
             }
         });
     }
@@ -3046,6 +3085,7 @@ void MainWindow::LoadUiSettings() {
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
         {QStringLiteral("largeFiles"), largeFilesView_},
+        {QStringLiteral("staleFiles"), staleFilesView_},
         {QStringLiteral("search"), searchView_},
     };
     for (const auto& pair : views) {
@@ -3090,6 +3130,7 @@ void MainWindow::SaveUiSettings() const {
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
         {QStringLiteral("largeFiles"), largeFilesView_},
+        {QStringLiteral("staleFiles"), staleFilesView_},
         {QStringLiteral("search"), searchView_},
     };
     for (const auto& pair : views) {
@@ -3179,7 +3220,7 @@ void MainWindow::ShowShortcutHelp() {
     addHelpRow(QStringLiteral("移入回收站"), QStringLiteral("Delete"), QStringLiteral("对选中项执行受保护的回收站删除。"));
     addHelpRow(QStringLiteral("返回上级目录"), QStringLiteral("Backspace / Alt+Left"), QStringLiteral("目录内容页返回当前目录的上级。"));
     addHelpRow(QStringLiteral("导出当前列表"), QStringLiteral("Ctrl+E"), QStringLiteral("导出当前可见列表为 CSV。"));
-    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+6 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、快速搜索、垃圾清理。"));
+    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+7 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、长期未动、快速搜索、垃圾清理。"));
     addHelpRow(QStringLiteral("查看说明"), QStringLiteral("F1"), QStringLiteral("打开本说明窗口。"));
     table->resizeRowsToContents();
 
@@ -3435,6 +3476,12 @@ QWidget* MainWindow::CreateApplicationMenu() {
         }
     });
     duplicateTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+4")));
+    QAction* staleFilesTabAction = viewMenu->addAction(QStringLiteral("长期未动"), this, [this]() {
+        if (tabs_ != nullptr && staleFilesView_ != nullptr) {
+            tabs_->setCurrentWidget(staleFilesView_);
+        }
+    });
+    staleFilesTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+5")));
     viewMenu->addSeparator();
     viewMenu->addAction(QStringLiteral("快速搜索"), this, [this]() {
         if (tabs_ != nullptr && searchView_ != nullptr) {
@@ -3450,13 +3497,13 @@ QWidget* MainWindow::CreateApplicationMenu() {
             tabs_->setCurrentWidget(searchView_->parentWidget());
         }
     });
-    searchTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+5")));
+    searchTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+6")));
     QAction* cleanupTabAction = viewMenu->addAction(QStringLiteral("垃圾清理"), this, [this]() {
         if (tabs_ != nullptr && cleanupTree_ != nullptr) {
             tabs_->setCurrentWidget(cleanupTree_->parentWidget());
         }
     });
-    cleanupTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+6")));
+    cleanupTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+7")));
     createMenuButton(QStringLiteral("视图"), viewMenu);
 
     QMenu* toolsMenu = new QMenu(QStringLiteral("工具"), frame);
@@ -3820,15 +3867,40 @@ QWidget* MainWindow::CreateWorkspace() {
     largeFilesTable_->hide();
     typeStatsTable_ = CreateResultTable();
     duplicateTable_ = CreateResultTable();
+    staleFilesModel_ = new ResultTableModel(this);
+    staleFilesView_ = new QTableView(rightPanel);
+    staleFilesView_->setModel(staleFilesModel_);
+    staleFilesView_->setHorizontalHeader(new ModernHeaderView(Qt::Horizontal, staleFilesView_));
+    staleFilesView_->setItemDelegateForColumn(3, new PathElideDelegate(staleFilesView_));
+    staleFilesView_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    staleFilesView_->setSelectionMode(QAbstractItemView::SingleSelection);
+    staleFilesView_->setAlternatingRowColors(true);
+    staleFilesView_->setShowGrid(false);
+    staleFilesView_->setIconSize(QSize(16, 16));
+    staleFilesView_->setTextElideMode(Qt::ElideMiddle);
+    staleFilesView_->verticalHeader()->setVisible(false);
+    staleFilesView_->verticalHeader()->setDefaultSectionSize(28);
+    staleFilesView_->horizontalHeader()->setStretchLastSection(false);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    staleFilesView_->setColumnWidth(0, 230);
+    staleFilesView_->setColumnWidth(1, 110);
+    staleFilesView_->setColumnWidth(2, 90);
+    staleFilesView_->setColumnWidth(3, 460);
+    staleFilesView_->setSortingEnabled(true);
+    staleFilesView_->sortByColumn(4, Qt::AscendingOrder);
 
     tabs_->addTab(directoryView_, QStringLiteral("目录内容"));
     tabs_->addTab(largeFilesView_, QStringLiteral("大文件"));
     tabs_->addTab(typeStatsTable_, QStringLiteral("类型统计"));
     tabs_->addTab(duplicateTable_, QStringLiteral("疑似重复"));
+    tabs_->addTab(staleFilesView_, QStringLiteral("长期未动"));
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
     tabs_->addTab(CreateCleanupTab(), QStringLiteral("垃圾清理"));
-    tabs_->tabBar()->setTabVisible(4, false);
     tabs_->tabBar()->setTabVisible(5, false);
+    tabs_->tabBar()->setTabVisible(6, false);
 
     rightLayout->addWidget(metrics);
     rightLayout->addWidget(tabs_, 1);
@@ -4309,6 +4381,7 @@ void MainWindow::UpdateModuleChrome() {
     const bool isDiskAnalysisPage =
         currentPage == directoryView_ ||
         currentPage == largeFilesView_ ||
+        currentPage == staleFilesView_ ||
         currentPage == typeStatsTable_ ||
         currentPage == duplicateTable_;
 
@@ -5159,6 +5232,11 @@ void MainWindow::InstallEmptyStateOverlays() {
         QStringLiteral("完成扫描后切换到本页，会按需生成大文件列表"),
         app_icons::fileGlyph(48)));
 
+    AttachEmptyOverlay(staleFilesView_, CreateEmptyOverlay(staleFilesView_,
+        QStringLiteral("暂无长期未动文件"),
+        QStringLiteral("完成扫描后切换到本页，会按修改时间列出长期未变的大文件"),
+        app_icons::fileGlyph(48)));
+
     AttachEmptyOverlay(searchView_, CreateEmptyOverlay(searchView_,
         QStringLiteral("输入关键字开始搜索"),
         QStringLiteral("全系统搜索文件名、扩展名或路径片段"),
@@ -5525,6 +5603,7 @@ void MainWindow::ResetDeferredTableStates() {
     largeFilesTableLoaded_ = false;
     typeStatsTableLoaded_ = false;
     duplicateTableLoaded_ = false;
+    staleFilesTableLoaded_ = false;
 
     if (largeFilesModel_ != nullptr) {
         largeFilesModel_->SetRows(QVector<ResultRow>{
@@ -5533,6 +5612,22 @@ void MainWindow::ResetDeferredTableStates() {
                 QStringLiteral("-"),
                 QStringLiteral("提示"),
                 QStringLiteral("大文件列表会按需生成，避免扫描完成后卡住界面"),
+                QString(),
+                QString(),
+                0,
+                0,
+                false,
+                false,
+            }
+        });
+    }
+    if (staleFilesModel_ != nullptr) {
+        staleFilesModel_->SetRows(QVector<ResultRow>{
+            ResultRow{
+                QStringLiteral("切换到此页时加载"),
+                QStringLiteral("-"),
+                QStringLiteral("提示"),
+                QStringLiteral("长期未动文件列表会按需生成，列出最久未修改的大文件"),
                 QString(),
                 QString(),
                 0,
@@ -5565,6 +5660,11 @@ void MainWindow::PopulateCurrentDeferredTab() {
     if (current == duplicateTable_ && !duplicateTableLoaded_) {
         duplicateTableLoaded_ = true;
         PopulateDuplicateTable();
+        return;
+    }
+    if (current == staleFilesView_ && !staleFilesTableLoaded_) {
+        staleFilesTableLoaded_ = true;
+        PopulateStaleFilesTable();
     }
 }
 
@@ -5641,6 +5741,8 @@ void MainWindow::PopulateDirectoryTable(const core::ScanNode& node) {
             reinterpret_cast<quint64>(child.get()),
             isDirectory,
             false,
+            FormatModifiedDate(child->lastModifiedMsec),
+            child->lastModifiedMsec,
         });
         ++visibleRows;
         if (visibleRows >= maxDirectoryRows) {
@@ -5786,6 +5888,8 @@ void MainWindow::PopulateLargeFilesTable() {
                 reinterpret_cast<quint64>(file),
                 false,
                 false,
+                FormatModifiedDate(file->lastModifiedMsec),
+                file->lastModifiedMsec,
             });
         }
 
@@ -5795,6 +5899,124 @@ void MainWindow::PopulateLargeFilesTable() {
             }
             if (largeFilesModel_ != nullptr) {
                 largeFilesModel_->SetRows(std::move(*rows));
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::PopulateStaleFilesTable() {
+    if (!latestResult_ || !latestResult_->root) {
+        return;
+    }
+
+    if (staleFilesModel_ != nullptr) {
+        staleFilesModel_->SetRows(QVector<ResultRow>{
+            ResultRow{
+                QStringLiteral("正在生成长期未动文件列表"),
+                QStringLiteral("-"),
+                QStringLiteral("加载中"),
+                QStringLiteral("后台筛选最久未修改的大文件，不阻塞界面操作"),
+                QString(),
+                QString(),
+                0,
+                0,
+                false,
+                false,
+            }
+        });
+    }
+    const std::shared_ptr<core::ScanResult> snapshot = latestResult_;
+    const core::ScanNode* root = snapshot->root.get();
+    const QString filterText = filterEdit_ != nullptr ? filterEdit_->text().trimmed() : QString();
+    std::thread([this, snapshot, root, filterText]() {
+        constexpr std::size_t maxStaleFiles = 2000;
+        constexpr std::uint64_t minFileBytes = 1024ULL * 1024ULL;  // 仅统计 ≥1 MiB 的文件，避免系统小文件刷屏。
+        // 最大堆：堆顶 mtime 最大；满后淘汰最大的，最终保留最老的 N 个。
+        auto newestFirst = [](const core::ScanNode* left, const core::ScanNode* right) {
+            return left->lastModifiedMsec < right->lastModifiedMsec;
+        };
+        std::priority_queue<const core::ScanNode*, std::vector<const core::ScanNode*>, decltype(newestFirst)> topFiles(newestFirst);
+
+        std::vector<const core::ScanNode*> stack;
+        stack.reserve(4096);
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const core::ScanNode* node = stack.back();
+            stack.pop_back();
+            if (node == nullptr) {
+                continue;
+            }
+
+            if (node->kind == core::NodeKind::File) {
+                // 仅纳入有有效修改时间、且达到最小大小的文件。
+                if (node->lastModifiedMsec <= 0 || node->ownBytes < minFileBytes) {
+                    continue;
+                }
+                if (!filterText.isEmpty()) {
+                    const QString name = ToQString(node->name);
+                    const QString path = ToQString(node->path);
+                    if (!name.contains(filterText, Qt::CaseInsensitive) && !path.contains(filterText, Qt::CaseInsensitive)) {
+                        continue;
+                    }
+                }
+
+                if (topFiles.size() < maxStaleFiles) {
+                    topFiles.push(node);
+                } else if (!topFiles.empty() && node->lastModifiedMsec < topFiles.top()->lastModifiedMsec) {
+                    topFiles.pop();
+                    topFiles.push(node);
+                }
+                continue;
+            }
+
+            for (const auto& child : node->children) {
+                stack.push_back(child.get());
+            }
+        }
+
+        std::vector<const core::ScanNode*> files;
+        files.reserve(topFiles.size());
+        while (!topFiles.empty()) {
+            files.push_back(topFiles.top());
+            topFiles.pop();
+        }
+        // 升序：最久未修改（mtime 最小）的排在最前。
+        std::sort(files.begin(), files.end(), [](const core::ScanNode* left, const core::ScanNode* right) {
+            return left->lastModifiedMsec < right->lastModifiedMsec;
+        });
+
+        auto rows = std::make_shared<QVector<ResultRow>>();
+        rows->reserve(static_cast<int>(files.size()));
+        for (const core::ScanNode* file : files) {
+            const QString name = ToQString(file->name);
+            const QString path = ToQString(file->path);
+            rows->push_back(ResultRow{
+                name,
+                ToQString(core::FormatBytes(file->totalBytes)),
+                QStringLiteral("文件"),
+                ContainingDirectoryForDisplay(path, false),
+                path,
+                MakeSearchKey(name, path),
+                file->totalBytes,
+                reinterpret_cast<quint64>(file),
+                false,
+                false,
+                FormatModifiedDate(file->lastModifiedMsec),
+                file->lastModifiedMsec,
+            });
+        }
+
+        QMetaObject::invokeMethod(this, [this, snapshot, root, rows]() {
+            if (latestResult_ != snapshot || !latestResult_ || latestResult_->root.get() != root) {
+                return;
+            }
+            if (staleFilesModel_ != nullptr) {
+                if (rows->isEmpty()) {
+                    // 无结果时清空模型，由空状态遮罩统一提示（与大文件页一致）。
+                    staleFilesModel_->Clear();
+                } else {
+                    staleFilesModel_->SetRows(std::move(*rows));
+                }
             }
         }, Qt::QueuedConnection);
     }).detach();
@@ -7334,6 +7556,15 @@ void MainWindow::OpenSelectedPath() {
         RevealPathInExplorer(row->fullPath);
         return;
     }
+    if (tabs_ != nullptr && tabs_->currentWidget() == staleFilesView_) {
+        const ResultRow* row = staleFilesModel_ != nullptr ? staleFilesModel_->RowAt(staleFilesView_->currentIndex().row()) : nullptr;
+        if (row == nullptr || row->fullPath.isEmpty()) {
+            SetInfoBar(QStringLiteral("请选择项目"), 0, 0, QStringLiteral("没有选中路径"));
+            return;
+        }
+        RevealPathInExplorer(row->fullPath);
+        return;
+    }
     if (tabs_ != nullptr && tabs_->currentWidget() != nullptr && tabs_->currentWidget()->isAncestorOf(searchView_)) {
         const ResultRow* row = searchModel_ != nullptr ? searchModel_->RowAt(searchView_->currentIndex().row()) : nullptr;
         if (row == nullptr || row->fullPath.isEmpty()) {
@@ -7361,9 +7592,10 @@ void MainWindow::OpenSelectedPath() {
 void MainWindow::ExportCurrentTable() {
     QTableWidget* table = CurrentTable();
     const bool exportingLargeFiles = tabs_ != nullptr && tabs_->currentWidget() == largeFilesView_ && largeFilesModel_ != nullptr;
+    const bool exportingStaleFiles = tabs_ != nullptr && tabs_->currentWidget() == staleFilesView_ && staleFilesModel_ != nullptr;
     const bool exportingSearch = tabs_ != nullptr && tabs_->currentWidget() != nullptr && tabs_->currentWidget()->isAncestorOf(searchView_) && searchModel_ != nullptr;
     const bool exportingCleanup = tabs_ != nullptr && tabs_->currentWidget() != nullptr && cleanupTree_ != nullptr && tabs_->currentWidget()->isAncestorOf(cleanupTree_);
-    if (table == nullptr && !exportingLargeFiles && !exportingSearch && !exportingCleanup) {
+    if (table == nullptr && !exportingLargeFiles && !exportingStaleFiles && !exportingSearch && !exportingCleanup) {
         return;
     }
 
@@ -7380,6 +7612,22 @@ void MainWindow::ExportCurrentTable() {
     if (exportingLargeFiles) {
         for (int row = 0; row < largeFilesModel_->rowCount(); ++row) {
             const ResultRow* item = largeFilesModel_->RowAt(row);
+            if (item == nullptr) {
+                continue;
+            }
+            QStringList values;
+            values << EscapeCsv(item->name)
+                   << EscapeCsv(item->size)
+                   << EscapeCsv(item->type)
+                   << EscapeCsv(item->fullPath.isEmpty() ? item->displayPath : item->fullPath);
+            file << values.join(QStringLiteral(",")).toStdWString() << L"\n";
+        }
+        SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
+        return;
+    }
+    if (exportingStaleFiles) {
+        for (int row = 0; row < staleFilesModel_->rowCount(); ++row) {
+            const ResultRow* item = staleFilesModel_->RowAt(row);
             if (item == nullptr) {
                 continue;
             }

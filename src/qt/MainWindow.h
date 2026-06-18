@@ -525,6 +525,11 @@ private:
     void PopulateDuplicateTable();
 
     /**
+     * @brief 填充长期未动文件表格（按修改时间最旧排序）。
+     */
+    void PopulateStaleFilesTable();
+
+    /**
      * @brief 根据当前搜索框填充快速搜索结果。
      */
     void PopulateSearchTable();
@@ -858,6 +863,16 @@ private:
      * @brief 疑似重复表格。
      */
     QTableWidget* duplicateTable_ = nullptr;
+
+    /**
+     * @brief 长期未动文件虚拟结果表。
+     */
+    QTableView* staleFilesView_ = nullptr;
+
+    /**
+     * @brief 长期未动文件虚拟结果模型。
+     */
+    ResultTableModel* staleFilesModel_ = nullptr;
 
     /**
      * @brief 快速搜索输入框。
@@ -1212,6 +1227,11 @@ private:
      * @brief 疑似重复表格是否已经为当前扫描结果加载。
      */
     bool duplicateTableLoaded_ = false;
+
+    /**
+     * @brief 长期未动文件表格是否已经为当前扫描结果加载。
+     */
+    bool staleFilesTableLoaded_ = false;
 
     /**
      * @brief 当前垃圾清理扫描分组。

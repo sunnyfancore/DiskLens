@@ -66,6 +66,14 @@ struct ScanNode {
     std::uint64_t totalBytes = 0;
 
     /**
+     * @brief 最后修改时间，Unix epoch 毫秒（对齐 QDateTime::toMSecsSinceEpoch）。
+     *
+     * 0 表示未知/未采集。用于"文件年龄"分析（长期未动文件）与表格的修改时间列。
+     * 目录节点取其内容最后一次变更时间，文件节点取自身修改时间。
+     */
+    std::int64_t lastModifiedMsec = 0;
+
+    /**
      * @brief 子节点列表。
      */
     std::vector<std::unique_ptr<ScanNode>> children;

@@ -52,6 +52,23 @@ bool IsDotDirectory(const wchar_t* name) {
     return wcscmp(name, L".") == 0 || wcscmp(name, L"..") == 0;
 }
 
+/**
+ * @brief 把 Windows FILETIME 转换为 Unix epoch 毫秒（对齐 QDateTime::toMSecsSinceEpoch）。
+ * @param fileTime Windows FILETIME（1601-01-01 起，100ns 单位）。
+ * @return Unix epoch 毫秒；非法或早于 1970 的值返回 0（表示未知）。
+ */
+std::int64_t FileTimeToEpochMsec(const FILETIME& fileTime) {
+    ULARGE_INTEGER large;
+    large.LowPart = fileTime.dwLowDateTime;
+    large.HighPart = fileTime.dwHighDateTime;
+    // 1601-01-01 到 1970-01-01 的 100ns 计数。
+    constexpr std::uint64_t epochOffset100ns = 116444736000000000ULL;
+    if (large.QuadPart < epochOffset100ns) {
+        return 0;
+    }
+    return static_cast<std::int64_t>((large.QuadPart - epochOffset100ns) / 10000ULL);
+}
+
 }  // namespace
 
 DirectoryScanner::DirectoryScanner() : cancelled_(false) {}
@@ -209,12 +226,14 @@ void DirectoryScanner::ScanDirectory(
         const std::wstring childPath = JoinPath(directory.path, childName);
         const bool isDirectory = (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         const bool isReparsePoint = (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        const std::int64_t modifiedMsec = FileTimeToEpochMsec(findData.ftLastWriteTime);
 
         if (isDirectory && !isReparsePoint) {
             auto child = std::make_unique<ScanNode>();
             child->name = childName;
             child->path = childPath;
             child->kind = NodeKind::Directory;
+            child->lastModifiedMsec = modifiedMsec;
 
             ScanNode* childRaw = child.get();
             directory.children.push_back(std::move(child));
@@ -235,6 +254,7 @@ void DirectoryScanner::ScanDirectory(
             file->kind = NodeKind::File;
             file->ownBytes = fileBytes;
             file->totalBytes = fileBytes;
+            file->lastModifiedMsec = modifiedMsec;
 
             directory.children.push_back(std::move(file));
             AddExtension(stats.extensions, childName, fileBytes);

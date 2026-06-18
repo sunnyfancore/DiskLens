@@ -90,6 +90,11 @@ struct MftEntry {
      * @brief 是否为目录。
      */
     bool isDirectory = false;
+
+    /**
+     * @brief 最后修改时间，Unix epoch 毫秒；0 表示未采集。
+     */
+    std::int64_t modificationTime = 0;
 };
 
 /**
@@ -449,6 +454,23 @@ std::vector<DataRun> ParseMftDataRuns(const std::vector<std::uint8_t>& record) {
 }
 
 /**
+ * @brief 把 Windows FILETIME 转换为 Unix epoch 毫秒（对齐 QDateTime::toMSecsSinceEpoch）。
+ * @param fileTime Windows FILETIME（1601-01-01 起，100ns 单位）。
+ * @return Unix epoch 毫秒；非法或早于 1970 的值返回 0（表示未知）。
+ */
+std::int64_t FileTimeToEpochMsec(const FILETIME& fileTime) {
+    ULARGE_INTEGER large;
+    large.LowPart = fileTime.dwLowDateTime;
+    large.HighPart = fileTime.dwHighDateTime;
+    // 1601-01-01 到 1970-01-01 的 100ns 计数。
+    constexpr std::uint64_t epochOffset100ns = 116444736000000000ULL;
+    if (large.QuadPart < epochOffset100ns) {
+        return 0;
+    }
+    return static_cast<std::int64_t>((large.QuadPart - epochOffset100ns) / 10000ULL);
+}
+
+/**
  * @brief 解析单条 MFT 文件记录。
  * @param record MFT 记录缓冲区。
  * @param id 文件引用号低 48 位。
@@ -493,7 +515,17 @@ bool ParseFileRecord(const std::vector<std::uint8_t>& record, std::uint64_t id, 
         const std::uint8_t nonResident = record[offset + 8];
         const std::uint16_t nameLength = record[offset + 9];
 
-        if (type == 0x30 && nonResident == 0) {
+        if (type == 0x10 && nonResident == 0) {
+            // $STANDARD_INFORMATION：常驻属性体偏移 0x08 为最后修改时间（8 字节 FILETIME）。
+            const std::uint32_t valueLength = ReadLe<std::uint32_t>(record.data() + offset + 16);
+            const std::uint16_t valueOffset = ReadLe<std::uint16_t>(record.data() + offset + 20);
+            if (valueOffset + valueLength <= length && valueLength >= 0x10) {
+                const std::uint8_t* value = record.data() + offset + valueOffset;
+                FILETIME fileTime;
+                std::memcpy(&fileTime, value + 0x08, sizeof(FILETIME));
+                entry.modificationTime = FileTimeToEpochMsec(fileTime);
+            }
+        } else if (type == 0x30 && nonResident == 0) {
             const std::uint32_t valueLength = ReadLe<std::uint32_t>(record.data() + offset + 16);
             const std::uint16_t valueOffset = ReadLe<std::uint16_t>(record.data() + offset + 20);
             if (valueOffset + valueLength <= length && valueLength >= 66) {
@@ -873,6 +905,7 @@ ScanResult NtfsMftScanner::Scan(const std::wstring& rootPath) {
             node->kind = entry.isDirectory ? NodeKind::Directory : NodeKind::File;
             node->ownBytes = entry.isDirectory ? 0 : entry.bytes;
             node->totalBytes = entry.isDirectory ? 0 : entry.bytes;
+            node->lastModifiedMsec = entry.modificationTime;
 
             ScanNode* raw = node.get();
             nodeById[entry.id] = raw;
