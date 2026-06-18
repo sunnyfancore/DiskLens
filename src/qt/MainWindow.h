@@ -1062,6 +1062,11 @@ private:
          * @brief NTFS 父目录文件引用号低 48 位。
          */
         std::uint64_t parentReference = 0;
+
+        /**
+         * @brief 最后修改时间，Unix epoch 毫秒；0 表示未采集。
+         */
+        qint64 lastModifiedMsec = 0;
     };
 
     /**

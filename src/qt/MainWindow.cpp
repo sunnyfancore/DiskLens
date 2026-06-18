@@ -6277,6 +6277,8 @@ void MainWindow::PopulateSearchTable() {
                 0,
                 record->type == QStringLiteral("目录") || record->type == QStringLiteral("磁盘"),
                 false,
+                FormatModifiedDate(record->lastModifiedMsec),
+                record->lastModifiedMsec,
             });
         }
         if (rows->isEmpty()) {
@@ -6474,15 +6476,15 @@ void MainWindow::LoadSystemSearchIndexCache() {
         auto volumeStates = std::make_shared<std::vector<SearchVolumeState>>();
         QFile file(SearchIndexCacheFilePath());
         bool loaded = false;
+        quint32 version = 0;
         if (file.open(QIODevice::ReadOnly)) {
             QDataStream stream(&file);
             stream.setVersion(QDataStream::Qt_6_0);
 
             quint32 magic = 0;
-            quint32 version = 0;
             quint64 count = 0;
             stream >> magic >> version >> count;
-            if (magic == 0x4E444D53 && (version == 3 || version == 4) && stream.status() == QDataStream::Ok) {
+            if (magic == 0x4E444D53 && (version == 3 || version == 4 || version == 5) && stream.status() == QDataStream::Ok) {
                 if (version >= 4) {
                     quint64 stateCount = 0;
                     stream >> stateCount;
@@ -6524,6 +6526,11 @@ void MainWindow::LoadSystemSearchIndexCache() {
                         record.fileReference = static_cast<std::uint64_t>(fileReference);
                         record.parentReference = static_cast<std::uint64_t>(parentReference);
                     }
+                    if (version >= 5) {
+                        qint64 lastModifiedMsec = 0;
+                        stream >> lastModifiedMsec;
+                        record.lastModifiedMsec = lastModifiedMsec;
+                    }
                     if (record.searchKey.isEmpty()) {
                         record.searchKey = MakeSearchKey(record.name, record.path);
                     }
@@ -6533,7 +6540,7 @@ void MainWindow::LoadSystemSearchIndexCache() {
             }
         }
 
-        QMetaObject::invokeMethod(this, [this, records, volumeStates, loaded]() {
+        QMetaObject::invokeMethod(this, [this, records, volumeStates, loaded, version]() {
             searchCacheLoading_.store(false);
             if (searchIndexButton_ != nullptr) {
                 searchIndexButton_->setEnabled(true);
@@ -6542,15 +6549,18 @@ void MainWindow::LoadSystemSearchIndexCache() {
             if (loaded && !records->empty()) {
                 searchIndex_ = records;
                 searchVolumeStates_ = volumeStates;
+                // v3/v4 缓存没有修改时间字段,必须重建一次以补全 mtime(写入 v5)。
+                const bool needsUpgrade = version < 5;
                 if (searchScopeLabel_ != nullptr) {
-                    searchScopeLabel_->setText(volumeStates->empty()
-                        ? QStringLiteral("范围：旧版缓存 %1 项 · 正在升级索引")
+                    searchScopeLabel_->setText((needsUpgrade || volumeStates->empty())
+                        ? QStringLiteral("范围：%1缓存 %2 项 · 正在升级以补充修改时间")
+                            .arg(volumeStates->empty() ? QStringLiteral("旧版") : QStringLiteral("全系统"))
                             .arg(static_cast<qulonglong>(searchIndex_->size()))
                         : QStringLiteral("范围：全系统缓存 %1 项 · 正在增量校验")
                             .arg(static_cast<qulonglong>(searchIndex_->size())));
                 }
                 PopulateSearchTable();
-                if (volumeStates->empty()) {
+                if (volumeStates->empty() || needsUpgrade) {
                     QTimer::singleShot(0, this, &MainWindow::StartSystemSearchIndex);
                 }
                 return;
@@ -6578,7 +6588,8 @@ void MainWindow::LoadSystemSearchIndexCache() {
             QTimer::singleShot(0, this, &MainWindow::StartSystemSearchIndex);
         }, Qt::QueuedConnection);
 
-        if (loaded && !records->empty() && !volumeStates->empty()) {
+        // v3/v4 缓存缺修改时间,交给上面的 StartSystemSearchIndex 全量重建,这里不做增量。
+        if (loaded && !records->empty() && !volumeStates->empty() && version >= 5) {
             auto refreshedRecords = std::make_shared<std::vector<SearchRecord>>(*records);
             auto refreshedVolumeStates = std::make_shared<std::vector<SearchVolumeState>>(*volumeStates);
             const bool incrementallyRefreshed = RefreshSearchIndexFromJournal(*refreshedRecords, *refreshedVolumeStates);
@@ -6631,7 +6642,7 @@ void MainWindow::SaveSystemSearchIndexCacheSnapshot(const std::vector<SearchReco
     QDataStream stream(&file);
     stream.setVersion(QDataStream::Qt_6_0);
     stream << static_cast<quint32>(0x4E444D53);
-    stream << static_cast<quint32>(4);
+    stream << static_cast<quint32>(5);
     stream << static_cast<quint64>(records.size());
     stream << static_cast<quint64>(volumeStates.size());
     for (const SearchVolumeState& state : volumeStates) {
@@ -6653,6 +6664,7 @@ void MainWindow::SaveSystemSearchIndexCacheSnapshot(const std::vector<SearchReco
         stream << record.volumeRoot;
         stream << static_cast<quint64>(record.fileReference);
         stream << static_cast<quint64>(record.parentReference);
+        stream << static_cast<qint64>(record.lastModifiedMsec);
     }
     file.close();
 
@@ -7167,6 +7179,10 @@ void MainWindow::CollectSearchIndexFromNode(const core::ScanNode& node, std::vec
         path,
         MakeSearchKey(name, path),
         node.totalBytes,
+        QString(),
+        0,
+        0,
+        node.lastModifiedMsec,
     });
 
     for (const auto& child : node.children) {
@@ -7222,6 +7238,7 @@ bool MainWindow::CollectNtfsSearchIndex(const QString& rootPath, std::vector<Sea
                 rootPath,
                 record.fileReference,
                 record.parentReference,
+                record.lastModifiedMsec,
             });
         }
         return true;
@@ -7356,14 +7373,19 @@ bool MainWindow::RefreshSearchIndexFromJournal(std::vector<SearchRecord>& record
             const bool isDirectory = change.kind == core::NodeKind::Directory;
             std::uint64_t bytes = 0;
             QString sizeText = QStringLiteral("-");
-            if (!isDirectory) {
+            qint64 modifiedMsec = 0;
+            {
                 QFileInfo fileInfo(path);
-                if (fileInfo.exists() && fileInfo.isFile()) {
-                    bytes = static_cast<std::uint64_t>(std::max<qint64>(0, fileInfo.size()));
-                    sizeText = ToQString(core::FormatBytes(bytes));
+                if (fileInfo.exists()) {
+                    modifiedMsec = fileInfo.lastModified().toMSecsSinceEpoch();
+                    if (!isDirectory && fileInfo.isFile()) {
+                        bytes = static_cast<std::uint64_t>(std::max<qint64>(0, fileInfo.size()));
+                        sizeText = ToQString(core::FormatBytes(bytes));
+                    }
                 } else if (existing != indexByReference.end()) {
                     bytes = records[existing->second].bytes;
                     sizeText = records[existing->second].size;
+                    modifiedMsec = records[existing->second].lastModifiedMsec;
                 }
             }
 
@@ -7376,6 +7398,7 @@ bool MainWindow::RefreshSearchIndexFromJournal(std::vector<SearchRecord>& record
                 record.path = path;
                 record.searchKey = MakeSearchKey(name, path);
                 record.bytes = bytes;
+                record.lastModifiedMsec = modifiedMsec;
                 record.volumeRoot = state.rootPath;
                 record.parentReference = change.parentReference;
                 if (isDirectory) {
@@ -7391,6 +7414,7 @@ bool MainWindow::RefreshSearchIndexFromJournal(std::vector<SearchRecord>& record
             record.path = path;
             record.searchKey = MakeSearchKey(name, path);
             record.bytes = bytes;
+            record.lastModifiedMsec = modifiedMsec;
             record.volumeRoot = state.rootPath;
             record.fileReference = change.fileReference;
             record.parentReference = change.parentReference;
@@ -7447,6 +7471,13 @@ void MainWindow::CollectSystemSearchIndex(const QString& rootPath, std::vector<S
 
         const QString name = QString::fromStdWString(itemPath.filename().wstring());
         const QString path = QString::fromStdWString(itemPath.wstring());
+        qint64 modifiedMsec = 0;
+        {
+            QFileInfo pathInfo(path);
+            if (pathInfo.exists()) {
+                modifiedMsec = pathInfo.lastModified().toMSecsSinceEpoch();
+            }
+        }
         output.push_back(SearchRecord{
             name,
             isDirectory ? QStringLiteral("-") : ToQString(core::FormatBytes(bytes)),
@@ -7454,6 +7485,10 @@ void MainWindow::CollectSystemSearchIndex(const QString& rootPath, std::vector<S
             path,
             MakeSearchKey(name, path),
             bytes,
+            QString(),
+            0,
+            0,
+            modifiedMsec,
         });
         iterator.increment(error);
         if (error) {

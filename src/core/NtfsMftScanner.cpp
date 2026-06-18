@@ -1002,6 +1002,7 @@ FileIndexResult NtfsMftScanner::BuildFileIndex(const std::wstring& rootPath, con
             0,
             5,
             5,
+            0,
         });
         result.directoryCount = 1;
 
@@ -1031,6 +1032,7 @@ FileIndexResult NtfsMftScanner::BuildFileIndex(const std::wstring& rootPath, con
                     0,
                     entry.id,
                     entry.parentId,
+                    entry.modificationTime,
                 });
                 ++result.directoryCount;
                 continue;
@@ -1051,6 +1053,7 @@ FileIndexResult NtfsMftScanner::BuildFileIndex(const std::wstring& rootPath, con
                 entry.bytes,
                 entry.id,
                 entry.parentId,
+                entry.modificationTime,
             });
             ++result.fileCount;
         }

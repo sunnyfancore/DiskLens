@@ -142,6 +142,11 @@ struct FileIndexRecord {
      * @brief NTFS 父目录文件引用号低 48 位，用于增量索引拼接路径。
      */
     std::uint64_t parentReference = 0;
+
+    /**
+     * @brief 最后修改时间，Unix epoch 毫秒；0 表示未采集。
+     */
+    std::int64_t lastModifiedMsec = 0;
 };
 
 /**
