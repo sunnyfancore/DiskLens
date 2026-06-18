@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<!--
+    Qt 资源清单。
+    app.ico 会被编译进 Qt 可执行文件，供窗口图标和任务栏图标使用。
+-->
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="app.ico">../app/assets/app.ico</file>
+    </qresource>
+</RCC>

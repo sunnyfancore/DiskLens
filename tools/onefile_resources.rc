@@ -1,0 +1,53 @@
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "src\\app\\resource.h"
+
+1 ICON "build-onefile-payload\\app.ico"
+IDI_APP_ICON ICON "build-onefile-payload\\app.ico"
+1 RT_MANIFEST "src\\qt\\DiskLens.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,1,0,0
+ PRODUCTVERSION 0,1,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "SunnyFan"
+            VALUE "FileDescription", "磁盘洞察"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "InternalName", "磁盘洞察"
+            VALUE "OriginalFilename", "磁盘洞察-单文件版.exe"
+            VALUE "ProductName", "磁盘洞察"
+            VALUE "ProductVersion", "0.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+
+101 RCDATA "build-onefile-payload\\app.exe.cmp"
+102 RCDATA "build-onefile-payload\\Qt6Core.dll.cmp"
+103 RCDATA "build-onefile-payload\\Qt6Gui.dll.cmp"
+104 RCDATA "build-onefile-payload\\Qt6Widgets.dll.cmp"
+105 RCDATA "build-onefile-payload\\msvcp140.dll.cmp"
+106 RCDATA "build-onefile-payload\\vcruntime140.dll.cmp"
+107 RCDATA "build-onefile-payload\\vcruntime140_1.dll.cmp"
+108 RCDATA "build-onefile-payload\\qwindows.dll.cmp"
+109 RCDATA "build-onefile-payload\\msvcp140_1.dll.cmp"
+110 RCDATA "build-onefile-payload\\msvcp140_2.dll.cmp"
+111 RCDATA "build-onefile-payload\\concrt140.dll.cmp"
+112 RCDATA "build-onefile-payload\\qmodernwindowsstyle.dll.cmp"

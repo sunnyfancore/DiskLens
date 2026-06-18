@@ -1,0 +1,68 @@
+# ===== 构建输出目录 =====
+build-qt/
+build-qt-portable/
+build/
+build-*/
+out/
+release/
+
+# ===== CMake 生成物 =====
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+install_manifest.txt
+
+# ===== MSVC / 链接产物 =====
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.tlog
+*.lastbuildstate
+*.unsuccessfulbuild
+*.res
+*.aps
+
+# ===== 可执行文件 / 动态库（均为构建产物，源码内不应出现）=====
+*.exe
+*.dll
+
+# ===== Qt 自动生成 =====
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*_autogen/
+*.qmlc
+*.qmltc
+
+# ===== Visual Studio / IDE =====
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+*.opensdf
+*.sdf
+
+# ===== 本地构建脚本与临时文件（机器相关，不入库）=====
+_build_tmp*
+_verify_*
+build.log
+aqtinstall.log
+*.log
+
+# ===== 发布产物（打包输出）=====
+*.zip
+
+# ===== 操作系统杂物 =====
+Thumbs.db
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.DS_Store
