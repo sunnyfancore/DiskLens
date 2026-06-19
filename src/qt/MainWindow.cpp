@@ -3969,9 +3969,10 @@ QWidget* MainWindow::CreateWorkspace() {
     directoryView_->verticalHeader()->setDefaultSectionSize(28);
     directoryView_->horizontalHeader()->setStretchLastSection(false);
     directoryView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    directoryView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
-    directoryView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    directoryView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    directoryView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     directoryView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    directoryView_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     directoryView_->setColumnWidth(0, 230);
     directoryView_->setColumnWidth(1, 110);
     directoryView_->setColumnWidth(2, 90);
@@ -3995,9 +3996,10 @@ QWidget* MainWindow::CreateWorkspace() {
     largeFilesView_->verticalHeader()->setDefaultSectionSize(28);
     largeFilesView_->horizontalHeader()->setStretchLastSection(false);
     largeFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    largeFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
-    largeFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    largeFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    largeFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     largeFilesView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    largeFilesView_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     largeFilesView_->setColumnWidth(0, 230);
     largeFilesView_->setColumnWidth(1, 110);
     largeFilesView_->setColumnWidth(2, 90);
@@ -4007,6 +4009,12 @@ QWidget* MainWindow::CreateWorkspace() {
     largeFilesTable_ = CreateResultTable();
     largeFilesTable_->hide();
     typeStatsTable_ = CreateResultTable();
+    typeStatsTable_->setHorizontalHeaderLabels({
+        QStringLiteral("扩展名"),
+        QStringLiteral("总大小"),
+        QStringLiteral("文件数"),
+        QStringLiteral("说明")
+    });
     staleFilesModel_ = new ResultTableModel(this);
     staleFilesView_ = new QTableView(rightPanel);
     staleFilesView_->setModel(staleFilesModel_);
@@ -4022,9 +4030,10 @@ QWidget* MainWindow::CreateWorkspace() {
     staleFilesView_->verticalHeader()->setDefaultSectionSize(28);
     staleFilesView_->horizontalHeader()->setStretchLastSection(false);
     staleFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    staleFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
-    staleFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     staleFilesView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     staleFilesView_->setColumnWidth(0, 230);
     staleFilesView_->setColumnWidth(1, 110);
     staleFilesView_->setColumnWidth(2, 90);
@@ -4213,8 +4222,8 @@ QTableWidget* MainWindow::CreateResultTable() {
     table->verticalHeader()->setDefaultSectionSize(28);
     table->horizontalHeader()->setStretchLastSection(false);
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
-    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     table->setColumnWidth(0, 230);
     table->setColumnWidth(1, 110);
@@ -4265,9 +4274,10 @@ QWidget* MainWindow::CreateSearchTab() {
     searchView_->verticalHeader()->setDefaultSectionSize(28);
     searchView_->horizontalHeader()->setStretchLastSection(false);
     searchView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    searchView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Interactive);
-    searchView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Interactive);
+    searchView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    searchView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     searchView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    searchView_->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
     searchView_->setColumnWidth(0, 260);
     searchView_->setColumnWidth(1, 110);
     searchView_->setColumnWidth(2, 90);
@@ -4509,7 +4519,11 @@ QWidget* MainWindow::CreateCleanupTab() {
     cleanupTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     cleanupTree_->setIndentation(22);
     cleanupTree_->setIconSize(QSize(16, 16));
-    cleanupTree_->header()->setStretchLastSection(true);
+    cleanupTree_->header()->setStretchLastSection(false);
+    cleanupTree_->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    cleanupTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    cleanupTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    cleanupTree_->header()->setSectionResizeMode(3, QHeaderView::Stretch);
     cleanupTree_->header()->resizeSection(0, 300);
     cleanupTree_->header()->resizeSection(1, 120);
     cleanupTree_->header()->resizeSection(2, 110);
@@ -7232,7 +7246,11 @@ QWidget* MainWindow::CreateDuplicateTab() {
     duplicateTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     duplicateTree_->setIndentation(22);
     duplicateTree_->setIconSize(QSize(16, 16));
-    duplicateTree_->header()->setStretchLastSection(true);
+    duplicateTree_->header()->setStretchLastSection(false);
+    duplicateTree_->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    duplicateTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    duplicateTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    duplicateTree_->header()->setSectionResizeMode(3, QHeaderView::Stretch);
     duplicateTree_->header()->resizeSection(0, 280);
     duplicateTree_->header()->resizeSection(1, 100);
     duplicateTree_->header()->resizeSection(2, 150);
