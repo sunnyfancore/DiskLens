@@ -126,7 +126,9 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
     constexpr std::size_t logBytes = 512;
     std::vector<unsigned char> buffer(sizeof(NvmeProtocolQuery) + logBytes, 0);
     auto* query = reinterpret_cast<NvmeProtocolQuery*>(buffer.data());
-    query->propertyQuery.PropertyId = StorageAdapterProtocolSpecificProperty;
+    // 设备级协议属性:SMART/Health 日志页属设备数据,须用 StorageDeviceProtocolSpecificProperty;
+    // 误用 StorageAdapterProtocolSpecificProperty 会被 storport 判参数无效,返回错误码 87。
+    query->propertyQuery.PropertyId = StorageDeviceProtocolSpecificProperty;
     query->propertyQuery.QueryType = PropertyStandardQuery;
     query->protocolData.ProtocolType = ProtocolTypeNvme;
     query->protocolData.DataType = NVMeDataTypeLogPage;
