@@ -27,6 +27,8 @@ class QCloseEvent;
 class QEvent;
 class QFrame;
 class QIcon;
+class QScrollArea;
+class QVBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPoint;
@@ -573,7 +575,7 @@ private:
     QWidget* CreateDuplicateTab();
 
     /**
-     * @brief 构造磁盘健康页(头部操作条 + 每盘一行健康表格)。
+     * @brief 构造磁盘健康页(头部操作条 + 每盘一卡的健康信息卡片)。
      */
     QWidget* CreateHealthTab();
 
@@ -583,9 +585,14 @@ private:
     void RefreshDiskHealth();
 
     /**
-     * @brief 用最新健康快照填充健康表格;取消正在进行的读取。
+     * @brief 用最新健康快照构建每盘一卡的健康信息卡片;清空旧卡片。
      */
-    void PopulateHealthTable(const std::vector<disk_lens::core::DiskHealthInfo>& infos);
+    void PopulateHealthCards(const std::vector<disk_lens::core::DiskHealthInfo>& infos);
+
+    /**
+     * @brief 构建单块物理盘的健康信息卡片(型号 + 状态徽章 + 健康度条 + 指标网格)。
+     */
+    QFrame* BuildHealthCard(const disk_lens::core::DiskHealthInfo& info, int row);
 
     /**
      * @brief 取消正在进行的磁盘健康后台读取。
@@ -595,9 +602,9 @@ private:
     /**
      * @brief 弹出磁盘健康详情对话框,完整展示单块物理盘的全部健康指标与诊断备注。
      *
-     * 健康表格列宽有限、长文本(序列号、诊断备注)会省略且 tooltip 不可靠;
+     * 卡片字段精简,长文本(序列号、诊断备注)展开不便;
      * 此对话框以全宽展开所有字段,并把失败原因备注单独成可换行、可选中复制的段落。
-     * @param row 健康表格中的行号(对应 healthInfos_ 的下标)。
+     * @param row 健康卡片序号(对应 healthInfos_ 的下标)。
      */
     void ShowHealthDetailDialog(int row);
 
@@ -996,9 +1003,24 @@ private:
     QWidget* healthPage_ = nullptr;
 
     /**
-     * @brief 磁盘健康表格(每行一个物理盘)。
+     * @brief 健康页卡片滚动容器(每盘一卡,竖向排列)。
      */
-    QTableWidget* healthTable_ = nullptr;
+    QScrollArea* healthScroll_ = nullptr;
+
+    /**
+     * @brief 卡片宿主容器(承载所有健康卡片 + 末尾弹簧)。
+     */
+    QWidget* healthCardsHost_ = nullptr;
+
+    /**
+     * @brief 卡片宿主的竖向布局。
+     */
+    QVBoxLayout* healthCardsLayout_ = nullptr;
+
+    /**
+     * @brief 健康页空状态占位(无数据 / 非管理员时居中提示)。
+     */
+    QLabel* healthEmptyHint_ = nullptr;
 
     /**
      * @brief 磁盘健康页状态文案(进度 / 提示)。

@@ -27,8 +27,10 @@
 #include <QFrame>
 #include <QEventLoop>
 #include <QGraphicsDropShadowEffect>
+#include <QContextMenuEvent>
 #include <QGridLayout>
 #include <QGuiApplication>
+#include <QScrollArea>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -5305,6 +5307,61 @@ void MainWindow::ApplyStyle() {
             left: 10px;
             padding: 0 @spaceXs;
         }
+    )" R"(
+        QFrame#HealthCard {
+            background: @cardBg;
+            border: 1px solid @cardBorder;
+            border-radius: @cardRadius;
+        }
+        QLabel#HealthCardModel {
+            color: @textPrimary;
+            font-size: @fsTitle pt;
+            font-weight: 600;
+        }
+        QLabel#HealthCardSub {
+            color: @textSecondary;
+            font-size: @fsBody pt;
+        }
+        QLabel#HealthCardKey {
+            color: @textMuted;
+            font-size: @fsCaption pt;
+        }
+        QLabel#HealthCardVal {
+            color: @textPrimary;
+            font-size: @fsBody pt;
+            font-weight: 600;
+        }
+        QLabel#HealthCardPct {
+            color: @textPrimary;
+            font-size: @fsLabel pt;
+            font-weight: 600;
+        }
+        QLabel#HealthBadge {
+            color: #ffffff;
+            background: @textMuted;
+            border: none;
+            border-radius: @pillRadius;
+            padding: 1px @spaceSm px;
+            font-size: @fsCaption pt;
+            font-weight: 600;
+        }
+        QLabel#HealthBadge[statusProp="good"] { background: @good; }
+        QLabel#HealthBadge[statusProp="warn"] { background: @warn; }
+        QLabel#HealthBadge[statusProp="danger"] { background: @danger; }
+        QLabel#HealthBadge[statusProp="muted"] { background: @textMuted; }
+        QProgressBar#HealthBar {
+            background: @cardBorder;
+            border: none;
+            border-radius: 3px;
+        }
+        QProgressBar#HealthBar::chunk {
+            border-radius: 3px;
+            background: @textMuted;
+        }
+        QProgressBar#HealthBar[statusProp="good"]::chunk { background: @good; }
+        QProgressBar#HealthBar[statusProp="warn"]::chunk { background: @warn; }
+        QProgressBar#HealthBar[statusProp="danger"]::chunk { background: @danger; }
+        QProgressBar#HealthBar[statusProp="muted"]::chunk { background: @textMuted; }
     )");
 
     // 注意：必须先替换更长的占位符再替换其前缀（如 @accentSoftBorder 先于 @accentSoft 先于 @accent），
@@ -5484,11 +5541,36 @@ void MainWindow::InitializeEmptyState() {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    const QEvent::Type type = event->type();
     // 视口尺寸或显隐变化时，让空状态遮罩始终铺满视口，避免缩放或切换标签页后错位。
-    if (event->type() == QEvent::Resize || event->type() == QEvent::Show) {
+    if (type == QEvent::Resize || type == QEvent::Show) {
         for (const EmptyOverlayEntry& entry : emptyOverlays_) {
             if (entry.overlay->isVisible() && entry.view->viewport() == watched) {
                 entry.overlay->setGeometry(entry.view->viewport()->rect());
+            }
+        }
+    }
+    // 健康卡片:整卡双击进详情、右键弹菜单。事件可能来自卡片或其任意子控件,
+    // 沿 parent 链向上找到挂了 healthRow 属性的卡片后按序号触发。
+    if (type == QEvent::MouseButtonDblClick || type == QEvent::ContextMenu) {
+        const QObject* obj = watched;
+        while (obj != nullptr && !obj->property("healthRow").isValid()) {
+            obj = obj->parent();
+        }
+        if (obj != nullptr) {
+            const int row = obj->property("healthRow").toInt();
+            if (row >= 0 && row < static_cast<int>(healthInfos_.size())) {
+                if (type == QEvent::MouseButtonDblClick) {
+                    ShowHealthDetailDialog(row);
+                    return true;
+                }
+                auto* menuEvent = static_cast<QContextMenuEvent*>(event);
+                QMenu menu(this);
+                menu.addAction(QStringLiteral("查看详情"), this, [this, row]() { ShowHealthDetailDialog(row); });
+                menu.addSeparator();
+                menu.addAction(QStringLiteral("刷新健康信息"), this, [this]() { RefreshDiskHealth(); });
+                menu.exec(menuEvent->globalPos());
+                return true;
             }
         }
     }
@@ -6823,64 +6905,29 @@ QWidget* MainWindow::CreateHealthTab() {
     headerLayout->addWidget(healthRefreshButton_);
     heroLayout->addLayout(headerLayout);
 
-    healthTable_ = new QTableWidget(hero);
-    healthTable_->setObjectName(QStringLiteral("CleanupTree"));
-    healthTable_->setColumnCount(9);
-    healthTable_->setHorizontalHeaderLabels({
-        QStringLiteral("磁盘"),
-        QStringLiteral("型号"),
-        QStringLiteral("接口"),
-        QStringLiteral("容量"),
-        QStringLiteral("健康度"),
-        QStringLiteral("温度"),
-        QStringLiteral("通电时长"),
-        QStringLiteral("状态"),
-        QStringLiteral("详情"),
-    });
-    healthTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    healthTable_->setSelectionMode(QAbstractItemView::SingleSelection);
-    healthTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    healthTable_->setAlternatingRowColors(true);
-    healthTable_->setShowGrid(false);
-    healthTable_->setIconSize(QSize(16, 16));
-    healthTable_->setTextElideMode(Qt::ElideMiddle);
-    healthTable_->verticalHeader()->setVisible(false);
-    healthTable_->verticalHeader()->setDefaultSectionSize(30);
-    healthTable_->setHorizontalHeader(new ModernHeaderView(Qt::Horizontal, healthTable_));
-    healthTable_->horizontalHeader()->setStretchLastSection(false);
-    healthTable_->setColumnWidth(0, 130);
-    healthTable_->setColumnWidth(1, 200);
-    healthTable_->setColumnWidth(2, 64);
-    healthTable_->setColumnWidth(3, 84);
-    healthTable_->setColumnWidth(4, 64);
-    healthTable_->setColumnWidth(5, 64);
-    healthTable_->setColumnWidth(6, 130);
-    healthTable_->setColumnWidth(7, 72);
-    healthTable_->setColumnWidth(8, 260);
-    healthTable_->setRowCount(0);
+    // 卡片滚动容器:每盘一卡,竖向排列;卡片超出视口时纵向滚动,横向不滚动。
+    healthScroll_ = new QScrollArea(page);
+    healthScroll_->setObjectName(QStringLiteral("HealthScroll"));
+    healthScroll_->setWidgetResizable(true);
+    healthScroll_->setFrameShape(QFrame::NoFrame);
+    healthScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    healthCardsHost_ = new QWidget();
+    healthCardsHost_->setObjectName(QStringLiteral("HealthCardsHost"));
+    healthCardsLayout_ = new QVBoxLayout(healthCardsHost_);
+    healthCardsLayout_->setContentsMargins(g_activeTokens.spaceLg, g_activeTokens.spaceMd, g_activeTokens.spaceLg, g_activeTokens.spaceMd);
+    healthCardsLayout_->setSpacing(g_activeTokens.spaceMd);
+    healthEmptyHint_ = new QLabel(
+        QStringLiteral("点击「读取健康信息」开始检测各物理盘的 SMART / NVMe 健康状态。读取物理盘需要管理员权限。"),
+        healthCardsHost_);
+    healthEmptyHint_->setObjectName(QStringLiteral("EmptyStateHint"));
+    healthEmptyHint_->setWordWrap(true);
+    healthEmptyHint_->setAlignment(Qt::AlignCenter);
+    healthCardsLayout_->addWidget(healthEmptyHint_);
+    healthCardsLayout_->addStretch(1);
+    healthScroll_->setWidget(healthCardsHost_);
 
     layout->addWidget(hero);
-    layout->addWidget(healthTable_, 1);
-
-    // 右键菜单与双击直达详情:表格列宽有限、长文本(序列号、诊断备注)会省略且 tooltip 不可靠,
-    // 故提供独立详情对话框完整展示单块物理盘的全部健康指标。
-    healthTable_->setContextMenuPolicy(Qt::CustomContextMenu);
-    connect(healthTable_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
-        const QModelIndex index = healthTable_->indexAt(position);
-        if (!index.isValid()) {
-            return;
-        }
-        healthTable_->selectionModel()->select(index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-        const int row = index.row();
-        QMenu menu(this);
-        menu.addAction(QStringLiteral("查看详情"), this, [this, row]() { ShowHealthDetailDialog(row); });
-        menu.addSeparator();
-        menu.addAction(QStringLiteral("刷新健康信息"), this, [this]() { RefreshDiskHealth(); });
-        menu.exec(healthTable_->viewport()->mapToGlobal(position));
-    });
-    connect(healthTable_, &QTableWidget::doubleClicked, this, [this](const QModelIndex& index) {
-        ShowHealthDetailDialog(index.row());
-    });
+    layout->addWidget(healthScroll_, 1);
 
     connect(healthRefreshButton_, &QPushButton::clicked, this, [this]() { RefreshDiskHealth(); });
     connect(healthCancelButton_, &QPushButton::clicked, this, [this]() { CancelDiskHealth(); });
@@ -6889,7 +6936,7 @@ QWidget* MainWindow::CreateHealthTab() {
 }
 
 void MainWindow::ShowHealthDetailDialog(int row) {
-    if (healthTable_ == nullptr || row < 0 || row >= static_cast<int>(healthInfos_.size())) {
+    if (healthCardsHost_ == nullptr || row < 0 || row >= static_cast<int>(healthInfos_.size())) {
         return;
     }
     const core::DiskHealthInfo& info = healthInfos_[row];
@@ -7011,7 +7058,7 @@ void MainWindow::ShowHealthDetailDialog(int row) {
 }
 
 void MainWindow::RefreshDiskHealth() {
-    if (healthQuerying_.load() || healthTable_ == nullptr) {
+    if (healthQuerying_.load() || healthCardsHost_ == nullptr) {
         return;
     }
 
@@ -7051,7 +7098,7 @@ void MainWindow::RefreshDiskHealth() {
                 return;
             }
             healthInfos_ = std::move(infos);
-            PopulateHealthTable(healthInfos_);
+            PopulateHealthCards(healthInfos_);
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -7066,106 +7113,53 @@ void MainWindow::CancelDiskHealth() {
     }
 }
 
-void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHealthInfo>& infos) {
-    if (healthTable_ == nullptr) {
+// 把卡片及其所有子控件都挂上事件过滤器,使整卡(含文字、进度条、徽章)双击进详情、右键弹菜单。
+static void InstallHealthCardFilter(QObject* filter, QObject* obj) {
+    obj->installEventFilter(filter);
+    const auto children = obj->children();
+    for (QObject* child : children) {
+        if (child->isWidgetType()) {
+            InstallHealthCardFilter(filter, child);
+        }
+    }
+}
+
+void MainWindow::PopulateHealthCards(const std::vector<disk_lens::core::DiskHealthInfo>& infos) {
+    if (healthCardsLayout_ == nullptr) {
         return;
     }
-    healthTable_->setRowCount(0);
-    healthTable_->setRowCount(static_cast<int>(infos.size()));
+    healthInfos_ = infos;
 
-    auto statusColor = [](core::DiskHealthStatus status) -> QColor {
-        switch (status) {
-            case core::DiskHealthStatus::Good: return QColor(QStringLiteral("#3FA34D"));
-            case core::DiskHealthStatus::Attention: return QColor(QStringLiteral("#E8A33D"));
-            case core::DiskHealthStatus::Warning: return QColor(QStringLiteral("#E0473E"));
-            default: return QColor(QStringLiteral("#8A8F98"));
-        }
-    };
+    // 清空旧卡片(healthEmptyHint_ 之外的所有直接子 QFrame);同步删除,布局随之自动移除其条目。
+    const auto oldCards = healthCardsHost_->findChildren<QFrame*>(QString(), Qt::FindDirectChildrenOnly);
+    for (QFrame* card : oldCards) {
+        delete card;
+    }
+    // 清空剩余布局条目(空状态占位的 QWidgetItem 与末尾弹簧),空状态控件本体保留,稍后重新追加。
+    while (healthCardsLayout_->count() > 0) {
+        QLayoutItem* item = healthCardsLayout_->takeAt(0);
+        delete item;
+    }
 
     int goodCount = 0;
     int attentionCount = 0;
     int warningCount = 0;
     int unreadableCount = 0;
-
     for (std::size_t i = 0; i < infos.size(); ++i) {
         const core::DiskHealthInfo& info = infos[i];
-        const int row = static_cast<int>(i);
-
-        QString diskText = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
-        if (!info.driveLetters.empty()) {
-            diskText += QStringLiteral(" · ") + ToQString(info.driveLetters);
-        }
-        const QString modelText = info.model.empty() ? QStringLiteral("(未知型号)") : ToQString(info.model);
-        const QString interfaceText = info.interfaceType.empty() ? QStringLiteral("-") : ToQString(info.interfaceType);
-        const QString capacityText = info.totalBytes > 0 ? ToQString(core::FormatBytes(info.totalBytes)) : QStringLiteral("-");
-        const QString healthText = info.healthPercent >= 0 ? QStringLiteral("%1%").arg(info.healthPercent) : QStringLiteral("-");
-        const QString tempText = info.temperatureCelsius >= 0 ? QStringLiteral("%1 °C").arg(info.temperatureCelsius) : QStringLiteral("-");
-        QString powerText;
-        if (info.powerOnHours >= 0) {
-            const long long hours = info.powerOnHours;
-            const long long days = hours / 24;
-            const long long remHours = hours % 24;
-            powerText = QStringLiteral("%1 小时").arg(static_cast<qlonglong>(hours));
-            if (days > 0) {
-                powerText += QStringLiteral(" · 约 %1 天 %2 时").arg(static_cast<qlonglong>(days)).arg(static_cast<qlonglong>(remHours));
-            }
-        } else {
-            powerText = QStringLiteral("-");
-        }
-        const QString statusText = info.statusText.empty() ? QStringLiteral("不可读取") : ToQString(info.statusText);
-        const QColor statusCol = statusColor(info.status);
-        // 备注作为悬浮提示:不可读取时说明具体原因(便于诊断),可读时说明数据来源。
-        const QString noteText = info.note.empty() ? QString() : ToQString(info.note);
-
-        auto* diskItem = new QTableWidgetItem(diskText);
-        auto* modelItem = new QTableWidgetItem(modelText);
-        auto* interfaceItem = new QTableWidgetItem(interfaceText);
-        auto* capacityItem = new QTableWidgetItem(capacityText);
-        auto* healthItem = new QTableWidgetItem(healthText);
-        auto* tempItem = new QTableWidgetItem(tempText);
-        auto* powerItem = new QTableWidgetItem(powerText);
-        auto* statusItem = new QTableWidgetItem(statusText);
-        // 详情列:可读时显示数据来源,不可读时显示具体原因(含 Windows 错误码),便于诊断与截图反馈。
-        auto* noteItem = new QTableWidgetItem(noteText.isEmpty() ? QStringLiteral("—") : noteText);
-        noteItem->setToolTip(noteText.isEmpty() ? QString() : noteText);
-
-        if (!noteText.isEmpty()) {
-            statusItem->setToolTip(noteText);
-            diskItem->setToolTip(diskText + QStringLiteral("\n") + noteText);
-        } else {
-            diskItem->setToolTip(diskText);
-        }
-
-        healthItem->setTextAlignment(Qt::AlignCenter);
-        tempItem->setTextAlignment(Qt::AlignCenter);
-        statusItem->setTextAlignment(Qt::AlignCenter);
-        interfaceItem->setTextAlignment(Qt::AlignCenter);
-        capacityItem->setTextAlignment(Qt::AlignCenter);
-        statusItem->setForeground(statusCol);
-        // 不可读取时,详情列文字同样着灰显眼,便于一眼定位诊断信息。
-        noteItem->setForeground(info.status == core::DiskHealthStatus::Unreadable ? statusCol : QColor(QStringLiteral("#8A8F98")));
-        // 健康度随状态着色,便于一眼定位异常盘。
-        if (info.status != core::DiskHealthStatus::Good && info.status != core::DiskHealthStatus::Unreadable) {
-            healthItem->setForeground(statusCol);
-        }
-
-        healthTable_->setItem(row, 0, diskItem);
-        healthTable_->setItem(row, 1, modelItem);
-        healthTable_->setItem(row, 2, interfaceItem);
-        healthTable_->setItem(row, 3, capacityItem);
-        healthTable_->setItem(row, 4, healthItem);
-        healthTable_->setItem(row, 5, tempItem);
-        healthTable_->setItem(row, 6, powerItem);
-        healthTable_->setItem(row, 7, statusItem);
-        healthTable_->setItem(row, 8, noteItem);
-
         switch (info.status) {
             case core::DiskHealthStatus::Good: ++goodCount; break;
             case core::DiskHealthStatus::Attention: ++attentionCount; break;
             case core::DiskHealthStatus::Warning: ++warningCount; break;
             default: ++unreadableCount; break;
         }
+        healthCardsLayout_->addWidget(BuildHealthCard(info, static_cast<int>(i)));
     }
+    if (healthEmptyHint_ != nullptr) {
+        healthEmptyHint_->setVisible(infos.empty());
+        healthCardsLayout_->addWidget(healthEmptyHint_);
+    }
+    healthCardsLayout_->addStretch(1);
 
     const QString summary = QStringLiteral("磁盘健康 · 共 %1 块物理盘 · 良好 %2 · 注意 %3 · 警告 %4 · 不可读取 %5")
         .arg(static_cast<int>(infos.size()))
@@ -7187,6 +7181,122 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
             healthStatusLabel_->setText(QStringLiteral("所有可读取磁盘状态良好。"));
         }
     }
+}
+
+QFrame* MainWindow::BuildHealthCard(const disk_lens::core::DiskHealthInfo& info, int row) {
+    auto* card = new QFrame(healthCardsHost_);
+    card->setObjectName(QStringLiteral("HealthCard"));
+    card->setProperty("healthRow", row);
+
+    // 状态映射到 QSS 属性 statusProp,统一驱动徽章与健康度条着色。
+    QString statusProp;
+    switch (info.status) {
+        case core::DiskHealthStatus::Good: statusProp = QStringLiteral("good"); break;
+        case core::DiskHealthStatus::Attention: statusProp = QStringLiteral("warn"); break;
+        case core::DiskHealthStatus::Warning: statusProp = QStringLiteral("danger"); break;
+        default: statusProp = QStringLiteral("muted"); break;
+    }
+    card->setProperty("statusProp", statusProp);
+
+    const QString dash = QStringLiteral("—");
+    const QString modelText = info.model.empty() ? QStringLiteral("(未知型号)") : ToQString(info.model);
+    const QString interfaceText = info.interfaceType.empty() ? QStringLiteral("-") : ToQString(info.interfaceType);
+    const QString capacityText = info.totalBytes > 0 ? ToQString(core::FormatBytes(info.totalBytes)) : QStringLiteral("-");
+    const QString statusText = info.statusText.empty() ? QStringLiteral("不可读取") : ToQString(info.statusText);
+    const QString healthText = info.healthPercent >= 0 ? QStringLiteral("%1%").arg(info.healthPercent) : dash;
+    const QString tempText = info.temperatureCelsius >= 0 ? QStringLiteral("%1 °C").arg(info.temperatureCelsius) : dash;
+    const QString powerText = info.powerOnHours >= 0 ? QStringLiteral("%1 小时").arg(static_cast<qlonglong>(info.powerOnHours)) : dash;
+    const QString cycleText = info.powerCycleCount >= 0 ? QString::number(static_cast<qlonglong>(info.powerCycleCount)) : dash;
+    const QString spareText = info.availableSparePercent >= 0 ? QStringLiteral("%1%").arg(info.availableSparePercent) : dash;
+    const QString reallocatedText = info.reallocatedSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.reallocatedSectorCount)) : dash;
+    const QString pendingText = info.currentPendingSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.currentPendingSectorCount)) : dash;
+    const QString uncorrectableText = info.uncorrectableSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.uncorrectableSectorCount)) : dash;
+    const QString lettersText = info.driveLetters.empty() ? QString() : ToQString(info.driveLetters);
+    const QString noteText = info.note.empty() ? QString() : ToQString(info.note);
+
+    QString diskTitle = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
+    if (!lettersText.isEmpty()) {
+        diskTitle += QStringLiteral(" · ") + lettersText;
+    }
+
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(g_activeTokens.spaceLg, g_activeTokens.spaceMd, g_activeTokens.spaceLg, g_activeTokens.spaceMd);
+    cardLayout->setSpacing(g_activeTokens.spaceMd);
+
+    // 顶部行:磁盘图标 + 标题(物理盘号 / 盘符)+ 状态徽章;下方副标题(型号 · 接口 · 容量)。
+    auto* iconLabel = new QLabel(card);
+    iconLabel->setPixmap(app_icons::drive(32).pixmap(32, 32));
+    auto* titleLabel = new QLabel(diskTitle, card);
+    titleLabel->setObjectName(QStringLiteral("HealthCardModel"));
+    titleLabel->setToolTip(noteText.isEmpty() ? diskTitle : diskTitle + QStringLiteral("\n") + noteText);
+    auto* badgeLabel = new QLabel(statusText, card);
+    badgeLabel->setObjectName(QStringLiteral("HealthBadge"));
+    badgeLabel->setProperty("statusProp", statusProp);
+    badgeLabel->setAlignment(Qt::AlignCenter);
+    badgeLabel->setToolTip(noteText.isEmpty() ? statusText : noteText);
+    auto* titleRow = new QHBoxLayout();
+    titleRow->setSpacing(g_activeTokens.spaceSm);
+    titleRow->addWidget(titleLabel, 1);
+    titleRow->addWidget(badgeLabel);
+    auto* subLabel = new QLabel(modelText + QStringLiteral("  ·  ") + interfaceText + QStringLiteral("  ·  ") + capacityText, card);
+    subLabel->setObjectName(QStringLiteral("HealthCardSub"));
+    subLabel->setWordWrap(true);
+    auto* infoBlock = new QVBoxLayout();
+    infoBlock->setSpacing(g_activeTokens.spaceXs);
+    infoBlock->addLayout(titleRow);
+    infoBlock->addWidget(subLabel);
+    auto* topRow = new QHBoxLayout();
+    topRow->setSpacing(g_activeTokens.spaceMd);
+    topRow->addWidget(iconLabel, 0, Qt::AlignTop);
+    topRow->addLayout(infoBlock, 1);
+    cardLayout->addLayout(topRow);
+
+    // 健康度行:标签 + 进度条 + 百分比。
+    auto* healthCaption = new QLabel(QStringLiteral("健康度"), card);
+    healthCaption->setObjectName(QStringLiteral("HealthCardKey"));
+    auto* healthBar = new QProgressBar(card);
+    healthBar->setObjectName(QStringLiteral("HealthBar"));
+    healthBar->setProperty("statusProp", statusProp);
+    healthBar->setRange(0, 100);
+    healthBar->setValue(info.healthPercent >= 0 ? info.healthPercent : 0);
+    healthBar->setTextVisible(false);
+    healthBar->setFixedHeight(8);
+    auto* pctLabel = new QLabel(healthText, card);
+    pctLabel->setObjectName(QStringLiteral("HealthCardPct"));
+    pctLabel->setMinimumWidth(48);
+    auto* healthRow = new QHBoxLayout();
+    healthRow->setSpacing(g_activeTokens.spaceSm);
+    healthRow->addWidget(healthCaption);
+    healthRow->addWidget(healthBar, 1);
+    healthRow->addWidget(pctLabel);
+    cardLayout->addLayout(healthRow);
+
+    // 指标网格:两列键值,温度 / 通电时长 / 通电次数 / 可用备用 / 重映射 / 待映射 / 离线无法校正。
+    auto* grid = new QGridLayout();
+    grid->setHorizontalSpacing(g_activeTokens.spaceLg);
+    grid->setVerticalSpacing(g_activeTokens.spaceXs);
+    grid->setColumnStretch(1, 1);
+    grid->setColumnStretch(3, 1);
+    auto addMetric = [&card, grid](int r, int c, const QString& key, const QString& val) {
+        auto* k = new QLabel(key, card);
+        k->setObjectName(QStringLiteral("HealthCardKey"));
+        auto* v = new QLabel(val, card);
+        v->setObjectName(QStringLiteral("HealthCardVal"));
+        grid->addWidget(k, r, c * 2);
+        grid->addWidget(v, r, c * 2 + 1);
+    };
+    addMetric(0, 0, QStringLiteral("温度"), tempText);
+    addMetric(0, 1, QStringLiteral("通电时长"), powerText);
+    addMetric(1, 0, QStringLiteral("通电次数"), cycleText);
+    addMetric(1, 1, QStringLiteral("可用备用"), spareText);
+    addMetric(2, 0, QStringLiteral("重映射扇区"), reallocatedText);
+    addMetric(2, 1, QStringLiteral("当前待映射"), pendingText);
+    addMetric(3, 0, QStringLiteral("离线无法校正"), uncorrectableText);
+    cardLayout->addLayout(grid);
+
+    // 整卡双击进详情、右键弹菜单(由 eventFilter 统一处理)。
+    InstallHealthCardFilter(this, card);
+    return card;
 }
 
 QWidget* MainWindow::CreateDuplicateTab() {
