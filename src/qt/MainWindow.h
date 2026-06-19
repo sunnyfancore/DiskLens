@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/DirectoryScanner.h"
+#include "core/DiskHealth.h"
 #include "core/FileHasher.h"
 #include "core/NtfsMftScanner.h"
 #include "core/ScanModels.h"
@@ -572,6 +573,26 @@ private:
     QWidget* CreateDuplicateTab();
 
     /**
+     * @brief 构造磁盘健康页(头部操作条 + 每盘一行健康表格)。
+     */
+    QWidget* CreateHealthTab();
+
+    /**
+     * @brief 后台读取所有物理盘 SMART/健康信息并填充健康表格。
+     */
+    void RefreshDiskHealth();
+
+    /**
+     * @brief 用最新健康快照填充健康表格;取消正在进行的读取。
+     */
+    void PopulateHealthTable(const std::vector<disk_lens::core::DiskHealthInfo>& infos);
+
+    /**
+     * @brief 取消正在进行的磁盘健康后台读取。
+     */
+    void CancelDiskHealth();
+
+    /**
      * @brief 填充长期未动文件表格（按修改时间最旧排序）。
      */
     void PopulateStaleFilesTable();
@@ -847,6 +868,11 @@ private:
     QPushButton* cleanupModuleButton_ = nullptr;
 
     /**
+     * @brief 主功能导航中的磁盘健康按钮。
+     */
+    QPushButton* healthModuleButton_ = nullptr;
+
+    /**
      * @brief 主工作区分割栏。
      */
     QSplitter* workspaceSplitter_ = nullptr;
@@ -954,6 +980,36 @@ private:
      * @brief 一键去重按钮(移入回收站 / 永久删除)。
      */
     QPushButton* duplicateDeleteButton_ = nullptr;
+
+    /**
+     * @brief 磁盘健康页(标签页直接挂载的容器,页签判定用它)。
+     */
+    QWidget* healthPage_ = nullptr;
+
+    /**
+     * @brief 磁盘健康表格(每行一个物理盘)。
+     */
+    QTableWidget* healthTable_ = nullptr;
+
+    /**
+     * @brief 磁盘健康页状态文案(进度 / 提示)。
+     */
+    QLabel* healthStatusLabel_ = nullptr;
+
+    /**
+     * @brief 磁盘健康模块信息栏文案(盘数 / 状态汇总)。
+     */
+    QLabel* healthInfoLabel_ = nullptr;
+
+    /**
+     * @brief 刷新磁盘健康按钮(触发后台 SMART 读取)。
+     */
+    QPushButton* healthRefreshButton_ = nullptr;
+
+    /**
+     * @brief 取消正在进行的磁盘健康读取。
+     */
+    QPushButton* healthCancelButton_ = nullptr;
 
     /**
      * @brief 长期未动文件虚拟结果表。
@@ -1359,6 +1415,21 @@ private:
      * @brief 重复内容校验取消标记。
      */
     std::atomic_bool duplicateHashCancel_{false};
+
+    /**
+     * @brief 是否正在后台执行磁盘健康读取。
+     */
+    std::atomic_bool healthQuerying_{false};
+
+    /**
+     * @brief 磁盘健康读取取消标记。
+     */
+    std::atomic_bool healthQueryCancel_{false};
+
+    /**
+     * @brief 最近一次读取到的物理盘健康快照(供表格刷新/导出复用)。
+     */
+    std::vector<disk_lens::core::DiskHealthInfo> healthInfos_;
 
     /**
      * @brief 长期未动文件表格是否已经为当前扫描结果加载。

@@ -3314,7 +3314,7 @@ void MainWindow::ShowShortcutHelp() {
     addHelpRow(QStringLiteral("移入回收站"), QStringLiteral("Delete"), QStringLiteral("对选中项执行受保护的回收站删除。"));
     addHelpRow(QStringLiteral("返回上级目录"), QStringLiteral("Backspace / Alt+Left"), QStringLiteral("目录内容页返回当前目录的上级。"));
     addHelpRow(QStringLiteral("导出当前列表"), QStringLiteral("Ctrl+E"), QStringLiteral("导出当前可见列表为 CSV。"));
-    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+7 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、长期未动、快速搜索、垃圾清理。"));
+    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+8 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、长期未动、快速搜索、垃圾清理、磁盘健康。"));
     addHelpRow(QStringLiteral("查看说明"), QStringLiteral("F1"), QStringLiteral("打开本说明窗口。"));
     table->resizeRowsToContents();
 
@@ -3598,6 +3598,12 @@ QWidget* MainWindow::CreateApplicationMenu() {
         }
     });
     cleanupTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+7")));
+    QAction* healthTabAction = viewMenu->addAction(QStringLiteral("磁盘健康"), this, [this]() {
+        if (tabs_ != nullptr && healthPage_ != nullptr) {
+            tabs_->setCurrentWidget(healthPage_);
+        }
+    });
+    healthTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+8")));
     createMenuButton(QStringLiteral("视图"), viewMenu);
 
     QMenu* toolsMenu = new QMenu(QStringLiteral("工具"), frame);
@@ -3818,10 +3824,12 @@ QWidget* MainWindow::CreateModuleSidebar() {
     diskModuleButton_ = createModuleButton(QStringLiteral("磁盘分析"), QStringLiteral("查看磁盘目录、大文件、类型统计和空间占用"));
     searchModuleButton_ = createModuleButton(QStringLiteral("文件搜索"), QStringLiteral("全系统快速搜索文件名、扩展名和路径片段"));
     cleanupModuleButton_ = createModuleButton(QStringLiteral("垃圾清理"), QStringLiteral("扫描可清理项目并按安全等级处理"));
+    healthModuleButton_ = createModuleButton(QStringLiteral("磁盘健康"), QStringLiteral("读取物理盘 SMART / NVMe 健康日志,查看温度、通电时长和健康评估"));
 
     layout->addWidget(diskModuleButton_);
     layout->addWidget(searchModuleButton_);
     layout->addWidget(cleanupModuleButton_);
+    layout->addWidget(healthModuleButton_);
     layout->addStretch(1);
 
     // 页脚分割线与品牌版本信息。
@@ -3854,6 +3862,15 @@ QWidget* MainWindow::CreateModuleSidebar() {
     connect(cleanupModuleButton_, &QPushButton::clicked, this, [this]() {
         if (tabs_ != nullptr && cleanupTree_ != nullptr) {
             tabs_->setCurrentWidget(cleanupTree_->parentWidget());
+        }
+        UpdateModuleChrome();
+    });
+    connect(healthModuleButton_, &QPushButton::clicked, this, [this]() {
+        if (tabs_ != nullptr && healthPage_ != nullptr) {
+            tabs_->setCurrentWidget(healthPage_);
+        }
+        if (!healthQuerying_ && healthInfos_.empty()) {
+            RefreshDiskHealth();
         }
         UpdateModuleChrome();
     });
@@ -3992,8 +4009,10 @@ QWidget* MainWindow::CreateWorkspace() {
     tabs_->addTab(staleFilesView_, QStringLiteral("长期未动"));
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
     tabs_->addTab(CreateCleanupTab(), QStringLiteral("垃圾清理"));
+    tabs_->addTab(CreateHealthTab(), QStringLiteral("磁盘健康"));
     tabs_->tabBar()->setTabVisible(5, false);
     tabs_->tabBar()->setTabVisible(6, false);
+    tabs_->tabBar()->setTabVisible(7, false);
 
     rightLayout->addWidget(metrics);
     rightLayout->addWidget(tabs_, 1);
@@ -4070,6 +4089,17 @@ QWidget* MainWindow::CreateInfoBar() {
     cleanupLayout->addWidget(cleanupInfoLabel_);
     cleanupLayout->addStretch(1);
     infoBarStack_->addWidget(cleanupFrame);
+
+    // 磁盘健康模块:盘数 / 状态汇总。
+    auto* healthFrame = new QFrame(infoBarStack_);
+    healthFrame->setObjectName(QStringLiteral("InfoBar"));
+    auto* healthLayout = new QHBoxLayout(healthFrame);
+    healthLayout->setContentsMargins(12, 8, 12, 8);
+    healthLayout->setSpacing(14);
+    healthInfoLabel_ = new QLabel(QStringLiteral("磁盘健康 · 尚未读取"), healthFrame);
+    healthLayout->addWidget(healthInfoLabel_);
+    healthLayout->addStretch(1);
+    infoBarStack_->addWidget(healthFrame);
 
     infoBarStack_->setCurrentIndex(0);
     return infoBarStack_;
@@ -4590,9 +4620,13 @@ void MainWindow::UpdateModuleChrome() {
     if (cleanupModuleButton_ != nullptr) {
         cleanupModuleButton_->setChecked(currentPage != nullptr && cleanupTree_ != nullptr && currentPage->isAncestorOf(cleanupTree_));
     }
+    if (healthModuleButton_ != nullptr) {
+        healthModuleButton_->setChecked(currentPage != nullptr && healthPage_ != nullptr && currentPage == healthPage_);
+    }
     if (infoBarStack_ != nullptr) {
         const bool isSearchPage = currentPage != nullptr && searchView_ != nullptr && currentPage->isAncestorOf(searchView_);
         const bool isCleanupPage = currentPage != nullptr && cleanupTree_ != nullptr && currentPage->isAncestorOf(cleanupTree_);
+        const bool isHealthPage = currentPage != nullptr && healthPage_ != nullptr && currentPage == healthPage_;
         if (isDiskAnalysisPage) {
             infoBarStack_->setCurrentIndex(0);
         } else if (isSearchPage) {
@@ -4600,6 +4634,8 @@ void MainWindow::UpdateModuleChrome() {
             UpdateSearchInfoBar();
         } else if (isCleanupPage) {
             infoBarStack_->setCurrentIndex(2);
+        } else if (isHealthPage) {
+            infoBarStack_->setCurrentIndex(3);
         } else {
             infoBarStack_->setCurrentIndex(0);
         }
@@ -5360,6 +5396,10 @@ void MainWindow::UpdateModuleNavIcons() {
     if (cleanupModuleButton_ != nullptr) {
         cleanupModuleButton_->setIcon(buildNavIcon(
             [px](const QColor& c) { return app_icons::trash(px, c); }, muted, accent));
+    }
+    if (healthModuleButton_ != nullptr) {
+        healthModuleButton_->setIcon(buildNavIcon(
+            [px](const QColor& c) { return app_icons::refresh(px, c); }, muted, accent));
     }
 }
 
@@ -6680,6 +6720,252 @@ void MainWindow::DeleteSelectedDuplicateItems() {
             .arg(cleaned)
             .arg(static_cast<qulonglong>(pending.size()))
             .arg(note));
+    }
+}
+
+QWidget* MainWindow::CreateHealthTab() {
+    auto* page = new QWidget(this);
+    healthPage_ = page;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+
+    auto* hero = new QFrame(page);
+    hero->setObjectName(QStringLiteral("CleanupHero"));
+    auto* heroLayout = new QVBoxLayout(hero);
+    heroLayout->setContentsMargins(16, 12, 16, 12);
+    heroLayout->setSpacing(8);
+
+    auto* titleLabel = new QLabel(QStringLiteral("磁盘健康监测"), hero);
+    titleLabel->setObjectName(QStringLiteral("CleanupTitle"));
+    healthStatusLabel_ = new QLabel(
+        QStringLiteral("读取每块物理盘的 SMART / NVMe 健康日志,查看温度、通电时长与寿命评估。读取物理盘需要管理员权限。"),
+        hero);
+    healthStatusLabel_->setObjectName(QStringLiteral("CleanupStatus"));
+    healthStatusLabel_->setWordWrap(true);
+
+    healthRefreshButton_ = new QPushButton(QStringLiteral("读取健康信息"), hero);
+    healthRefreshButton_->setObjectName(QStringLiteral("PrimaryButton"));
+    healthRefreshButton_->setMinimumHeight(40);
+    healthCancelButton_ = new QPushButton(QStringLiteral("取消"), hero);
+    healthCancelButton_->setMinimumHeight(40);
+    healthCancelButton_->hide();
+
+    auto* titleBlock = new QVBoxLayout();
+    titleBlock->setSpacing(2);
+    titleBlock->addWidget(titleLabel);
+    titleBlock->addWidget(healthStatusLabel_);
+    auto* headerLayout = new QHBoxLayout();
+    headerLayout->setSpacing(12);
+    headerLayout->addLayout(titleBlock, 1);
+    headerLayout->addWidget(healthCancelButton_);
+    headerLayout->addWidget(healthRefreshButton_);
+    heroLayout->addLayout(headerLayout);
+
+    healthTable_ = new QTableWidget(hero);
+    healthTable_->setObjectName(QStringLiteral("CleanupTree"));
+    healthTable_->setColumnCount(8);
+    healthTable_->setHorizontalHeaderLabels({
+        QStringLiteral("磁盘"),
+        QStringLiteral("型号"),
+        QStringLiteral("接口"),
+        QStringLiteral("容量"),
+        QStringLiteral("健康度"),
+        QStringLiteral("温度"),
+        QStringLiteral("通电时长"),
+        QStringLiteral("状态"),
+    });
+    healthTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    healthTable_->setSelectionMode(QAbstractItemView::SingleSelection);
+    healthTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    healthTable_->setAlternatingRowColors(true);
+    healthTable_->setShowGrid(false);
+    healthTable_->setIconSize(QSize(16, 16));
+    healthTable_->setTextElideMode(Qt::ElideMiddle);
+    healthTable_->verticalHeader()->setVisible(false);
+    healthTable_->verticalHeader()->setDefaultSectionSize(30);
+    healthTable_->setHorizontalHeader(new ModernHeaderView(Qt::Horizontal, healthTable_));
+    healthTable_->horizontalHeader()->setStretchLastSection(false);
+    healthTable_->setColumnWidth(0, 150);
+    healthTable_->setColumnWidth(1, 220);
+    healthTable_->setColumnWidth(2, 70);
+    healthTable_->setColumnWidth(3, 90);
+    healthTable_->setColumnWidth(4, 70);
+    healthTable_->setColumnWidth(5, 70);
+    healthTable_->setColumnWidth(6, 150);
+    healthTable_->setColumnWidth(7, 80);
+    healthTable_->setRowCount(0);
+
+    layout->addWidget(hero);
+    layout->addWidget(healthTable_, 1);
+
+    connect(healthRefreshButton_, &QPushButton::clicked, this, [this]() { RefreshDiskHealth(); });
+    connect(healthCancelButton_, &QPushButton::clicked, this, [this]() { CancelDiskHealth(); });
+
+    return page;
+}
+
+void MainWindow::RefreshDiskHealth() {
+    if (healthQuerying_.load() || healthTable_ == nullptr) {
+        return;
+    }
+
+    healthQueryCancel_.store(false);
+    healthQuerying_.store(true);
+    if (healthRefreshButton_ != nullptr) {
+        healthRefreshButton_->setEnabled(false);
+    }
+    if (healthCancelButton_ != nullptr) {
+        healthCancelButton_->show();
+    }
+    if (healthStatusLabel_ != nullptr) {
+        healthStatusLabel_->setText(QStringLiteral("正在读取物理盘健康信息(SMART / NVMe),请稍候……"));
+    }
+    if (healthInfoLabel_ != nullptr) {
+        healthInfoLabel_->setText(QStringLiteral("磁盘健康 · 正在读取……"));
+    }
+
+    std::thread([this]() {
+        const core::DiskHealth reader;
+        std::vector<core::DiskHealthInfo> infos = reader.QueryAll();
+
+        QMetaObject::invokeMethod(this, [this, infos = std::move(infos)]() mutable {
+            const bool cancelled = healthQueryCancel_.load();
+            healthQuerying_.store(false);
+            healthQueryCancel_.store(false);
+            if (healthRefreshButton_ != nullptr) {
+                healthRefreshButton_->setEnabled(true);
+            }
+            if (healthCancelButton_ != nullptr) {
+                healthCancelButton_->hide();
+            }
+            if (cancelled) {
+                if (healthStatusLabel_ != nullptr) {
+                    healthStatusLabel_->setText(QStringLiteral("已取消读取。点「读取健康信息」重新开始。"));
+                }
+                return;
+            }
+            healthInfos_ = std::move(infos);
+            PopulateHealthTable(healthInfos_);
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::CancelDiskHealth() {
+    if (!healthQuerying_.load()) {
+        return;
+    }
+    healthQueryCancel_.store(true);
+    if (healthStatusLabel_ != nullptr) {
+        healthStatusLabel_->setText(QStringLiteral("正在取消……"));
+    }
+}
+
+void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHealthInfo>& infos) {
+    if (healthTable_ == nullptr) {
+        return;
+    }
+    healthTable_->setRowCount(0);
+    healthTable_->setRowCount(static_cast<int>(infos.size()));
+
+    auto statusColor = [](core::DiskHealthStatus status) -> QColor {
+        switch (status) {
+            case core::DiskHealthStatus::Good: return QColor(QStringLiteral("#3FA34D"));
+            case core::DiskHealthStatus::Attention: return QColor(QStringLiteral("#E8A33D"));
+            case core::DiskHealthStatus::Warning: return QColor(QStringLiteral("#E0473E"));
+            default: return QColor(QStringLiteral("#8A8F98"));
+        }
+    };
+
+    int goodCount = 0;
+    int attentionCount = 0;
+    int warningCount = 0;
+    int unreadableCount = 0;
+
+    for (std::size_t i = 0; i < infos.size(); ++i) {
+        const core::DiskHealthInfo& info = infos[i];
+        const int row = static_cast<int>(i);
+
+        QString diskText = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
+        if (!info.driveLetters.empty()) {
+            diskText += QStringLiteral(" · ") + ToQString(info.driveLetters);
+        }
+        const QString modelText = info.model.empty() ? QStringLiteral("(未知型号)") : ToQString(info.model);
+        const QString interfaceText = info.interfaceType.empty() ? QStringLiteral("-") : ToQString(info.interfaceType);
+        const QString capacityText = info.totalBytes > 0 ? ToQString(core::FormatBytes(info.totalBytes)) : QStringLiteral("-");
+        const QString healthText = info.healthPercent >= 0 ? QStringLiteral("%1%").arg(info.healthPercent) : QStringLiteral("-");
+        const QString tempText = info.temperatureCelsius >= 0 ? QStringLiteral("%1 °C").arg(info.temperatureCelsius) : QStringLiteral("-");
+        QString powerText;
+        if (info.powerOnHours >= 0) {
+            const long long hours = info.powerOnHours;
+            const long long days = hours / 24;
+            const long long remHours = hours % 24;
+            powerText = QStringLiteral("%1 小时").arg(static_cast<qlonglong>(hours));
+            if (days > 0) {
+                powerText += QStringLiteral(" · 约 %1 天 %2 时").arg(static_cast<qlonglong>(days)).arg(static_cast<qlonglong>(remHours));
+            }
+        } else {
+            powerText = QStringLiteral("-");
+        }
+        const QString statusText = info.statusText.empty() ? QStringLiteral("不可读取") : ToQString(info.statusText);
+        const QColor statusCol = statusColor(info.status);
+
+        auto* diskItem = new QTableWidgetItem(diskText);
+        auto* modelItem = new QTableWidgetItem(modelText);
+        auto* interfaceItem = new QTableWidgetItem(interfaceText);
+        auto* capacityItem = new QTableWidgetItem(capacityText);
+        auto* healthItem = new QTableWidgetItem(healthText);
+        auto* tempItem = new QTableWidgetItem(tempText);
+        auto* powerItem = new QTableWidgetItem(powerText);
+        auto* statusItem = new QTableWidgetItem(statusText);
+
+        healthItem->setTextAlignment(Qt::AlignCenter);
+        tempItem->setTextAlignment(Qt::AlignCenter);
+        statusItem->setTextAlignment(Qt::AlignCenter);
+        interfaceItem->setTextAlignment(Qt::AlignCenter);
+        capacityItem->setTextAlignment(Qt::AlignCenter);
+        statusItem->setForeground(statusCol);
+        // 健康度随状态着色,便于一眼定位异常盘。
+        if (info.status != core::DiskHealthStatus::Good && info.status != core::DiskHealthStatus::Unreadable) {
+            healthItem->setForeground(statusCol);
+        }
+
+        healthTable_->setItem(row, 0, diskItem);
+        healthTable_->setItem(row, 1, modelItem);
+        healthTable_->setItem(row, 2, interfaceItem);
+        healthTable_->setItem(row, 3, capacityItem);
+        healthTable_->setItem(row, 4, healthItem);
+        healthTable_->setItem(row, 5, tempItem);
+        healthTable_->setItem(row, 6, powerItem);
+        healthTable_->setItem(row, 7, statusItem);
+
+        switch (info.status) {
+            case core::DiskHealthStatus::Good: ++goodCount; break;
+            case core::DiskHealthStatus::Attention: ++attentionCount; break;
+            case core::DiskHealthStatus::Warning: ++warningCount; break;
+            default: ++unreadableCount; break;
+        }
+    }
+
+    const QString summary = QStringLiteral("磁盘健康 · 共 %1 块物理盘 · 良好 %2 · 注意 %3 · 警告 %4 · 不可读取 %5")
+        .arg(static_cast<int>(infos.size()))
+        .arg(goodCount)
+        .arg(attentionCount)
+        .arg(warningCount)
+        .arg(unreadableCount);
+    if (healthInfoLabel_ != nullptr) {
+        healthInfoLabel_->setText(summary);
+    }
+    if (healthStatusLabel_ != nullptr) {
+        if (infos.empty()) {
+            healthStatusLabel_->setText(QStringLiteral("未发现可读取的物理盘(可能未以管理员身份运行,或无固定盘)。"));
+        } else if (warningCount > 0) {
+            healthStatusLabel_->setText(QStringLiteral("存在警告级别磁盘,建议尽快备份数据并考虑更换。"));
+        } else if (attentionCount > 0) {
+            healthStatusLabel_->setText(QStringLiteral("部分磁盘出现注意级别指标,建议持续留意。"));
+        } else {
+            healthStatusLabel_->setText(QStringLiteral("所有可读取磁盘状态良好。"));
+        }
     }
 }
 
