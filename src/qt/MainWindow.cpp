@@ -643,6 +643,80 @@ QString EscapeCsv(const QString& value) {
 }
 
 /**
+ * @brief 转义 HTML 文本（& < > " '）。
+ * @param value 原始文本。
+ * @return HTML 安全文本。
+ */
+QString EscapeHtml(const QString& value) {
+    QString escaped = value;
+    escaped.replace(QStringLiteral("&"), QStringLiteral("&amp;"));
+    escaped.replace(QStringLiteral("<"), QStringLiteral("&lt;"));
+    escaped.replace(QStringLiteral(">"), QStringLiteral("&gt;"));
+    escaped.replace(QStringLiteral("\""), QStringLiteral("&quot;"));
+    escaped.replace(QStringLiteral("'"), QStringLiteral("&#39;"));
+    return escaped;
+}
+
+/**
+ * @brief 把表头与行渲染为 CSV 文本（含表头行）。
+ * @param headers 表头。
+ * @param rows 数据行（每行一组原始单元格）。
+ * @return CSV 文本（不含 BOM）。
+ */
+QString RenderCsvRows(const QStringList& headers, const QVector<QStringList>& rows) {
+    QStringList headerCells;
+    headerCells.reserve(headers.size());
+    for (const QString& header : headers) {
+        headerCells << EscapeCsv(header);
+    }
+    QString out = headerCells.join(QStringLiteral(",")) + QStringLiteral("\n");
+    for (const QStringList& row : rows) {
+        QStringList cells;
+        cells.reserve(row.size());
+        for (const QString& cell : row) {
+            cells << EscapeCsv(cell);
+        }
+        out += cells.join(QStringLiteral(",")) + QStringLiteral("\n");
+    }
+    return out;
+}
+
+/**
+ * @brief 把表头与行渲染为带内联样式的 HTML 报表。
+ * @param title 报表标题。
+ * @param headers 表头。
+ * @param rows 数据行。
+ * @return 完整 HTML 文档（UTF-8，不含 BOM）。
+ */
+QString RenderHtmlTable(const QString& title, const QStringList& headers, const QVector<QStringList>& rows) {
+    QString out;
+    out += QStringLiteral("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
+    out += QStringLiteral("<title>") + EscapeHtml(title) + QStringLiteral("</title>");
+    out += QStringLiteral("<style>");
+    out += QStringLiteral("body{font-family:'Microsoft YaHei','Segoe UI',Arial,sans-serif;margin:24px;color:#222;}");
+    out += QStringLiteral("h1{font-size:18px;margin:0 0 12px;}");
+    out += QStringLiteral("table{border-collapse:collapse;width:100%;font-size:13px;}");
+    out += QStringLiteral("th,td{border:1px solid #ddd;padding:6px 10px;text-align:left;vertical-align:top;}");
+    out += QStringLiteral("th{background:#2c3e50;color:#fff;}");
+    out += QStringLiteral("tr:nth-child(even){background:#f6f8fa;}");
+    out += QStringLiteral("</style></head><body><h1>") + EscapeHtml(title) + QStringLiteral("</h1>");
+    out += QStringLiteral("<table><thead><tr>");
+    for (const QString& header : headers) {
+        out += QStringLiteral("<th>") + EscapeHtml(header) + QStringLiteral("</th>");
+    }
+    out += QStringLiteral("</tr></thead><tbody>");
+    for (const QStringList& row : rows) {
+        out += QStringLiteral("<tr>");
+        for (const QString& cell : row) {
+            out += QStringLiteral("<td>") + EscapeHtml(cell) + QStringLiteral("</td>");
+        }
+        out += QStringLiteral("</tr>");
+    }
+    out += QStringLiteral("</tbody></table></body></html>");
+    return out;
+}
+
+/**
  * @brief 获取单调时钟毫秒数。
  * @return 当前单调时钟毫秒数。
  */
@@ -7631,105 +7705,107 @@ void MainWindow::ExportCurrentTable() {
         return;
     }
 
-    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出 CSV"), QStringLiteral("磁盘洞察分析结果.csv"), QStringLiteral("CSV 文件 (*.csv)"));
+    QString selectedFilter;
+    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出"),
+        QStringLiteral("磁盘洞察分析结果.csv"),
+        QStringLiteral("CSV 文件 (*.csv);;HTML 报表 (*.html)"),
+        &selectedFilter);
     if (path.isEmpty()) {
         return;
+    }
+    const bool asHtml = selectedFilter.startsWith(QStringLiteral("HTML"))
+        || path.endsWith(QStringLiteral(".html"), Qt::CaseInsensitive);
+
+    const QStringList resultModelHeaders{
+        QStringLiteral("名称"),
+        QStringLiteral("大小"),
+        QStringLiteral("类型"),
+        QStringLiteral("路径"),
+        QStringLiteral("修改时间"),
+    };
+
+    QStringList headers;
+    QVector<QStringList> rows;
+
+    auto collectResultModelRows = [&rows](ResultTableModel* model) {
+        for (int row = 0; row < model->rowCount(); ++row) {
+            const ResultRow* item = model->RowAt(row);
+            if (item == nullptr) {
+                continue;
+            }
+            rows << (QStringList()
+                << item->name
+                << item->size
+                << item->type
+                << (item->fullPath.isEmpty() ? item->displayPath : item->fullPath)
+                << (item->modifiedText.isEmpty() ? QStringLiteral("—") : item->modifiedText));
+        }
+    };
+
+    if (exportingLargeFiles) {
+        headers = resultModelHeaders;
+        collectResultModelRows(largeFilesModel_);
+    } else if (exportingStaleFiles) {
+        headers = resultModelHeaders;
+        collectResultModelRows(staleFilesModel_);
+    } else if (exportingSearch) {
+        headers = resultModelHeaders;
+        collectResultModelRows(searchModel_);
+    } else if (exportingCleanup) {
+        headers = QStringList{QStringLiteral("名称"), QStringLiteral("大小"), QStringLiteral("类型"), QStringLiteral("路径")};
+        for (const CleanupGroup& group : cleanupGroups_) {
+            rows << (QStringList()
+                << group.name
+                << ToQString(core::FormatBytes(group.bytes))
+                << group.risk
+                << group.description);
+            for (std::size_t index = 0; index < group.paths.size(); ++index) {
+                const QString nativePath = QDir::toNativeSeparators(group.paths[index]);
+                const QString fileName = QFileInfo(nativePath).fileName();
+                const std::uint64_t bytes = index < group.pathBytes.size() ? group.pathBytes[index] : 0;
+                rows << (QStringList()
+                    << (fileName.isEmpty() ? nativePath : fileName)
+                    << ToQString(core::FormatBytes(bytes))
+                    << group.name
+                    << nativePath);
+            }
+        }
+    } else {
+        for (int column = 0; column < table->columnCount(); ++column) {
+            const QTableWidgetItem* headerItem = table->horizontalHeaderItem(column);
+            headers << (headerItem != nullptr ? headerItem->text() : QStringLiteral("列 %1").arg(column + 1));
+        }
+        for (int row = 0; row < table->rowCount(); ++row) {
+            QStringList cells;
+            for (int column = 0; column < table->columnCount(); ++column) {
+                const QTableWidgetItem* item = table->item(row, column);
+                QString value = item != nullptr ? item->text() : QString();
+                if (item != nullptr && column == 3) {
+                    const QString fullPath = item->data(Qt::UserRole).toString();
+                    if (!fullPath.isEmpty()) {
+                        value = fullPath;
+                    }
+                }
+                cells << value;
+            }
+            rows << cells;
+        }
     }
 
     std::wofstream file(path.toStdWString(), std::ios::binary);
     file.imbue(std::locale(".UTF-8"));
     file << L"\xfeff";
-    file << L"名称,大小,类型,路径\n";
+    const QString title = QStringLiteral("磁盘洞察 分析结果（%1 项）").arg(rows.size());
+    file << (asHtml ? RenderHtmlTable(title, headers, rows) : RenderCsvRows(headers, rows)).toStdWString();
 
-    if (exportingLargeFiles) {
-        for (int row = 0; row < largeFilesModel_->rowCount(); ++row) {
-            const ResultRow* item = largeFilesModel_->RowAt(row);
-            if (item == nullptr) {
-                continue;
-            }
-            QStringList values;
-            values << EscapeCsv(item->name)
-                   << EscapeCsv(item->size)
-                   << EscapeCsv(item->type)
-                   << EscapeCsv(item->fullPath.isEmpty() ? item->displayPath : item->fullPath);
-            file << values.join(QStringLiteral(",")).toStdWString() << L"\n";
-        }
-        SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
-        return;
-    }
-    if (exportingStaleFiles) {
-        for (int row = 0; row < staleFilesModel_->rowCount(); ++row) {
-            const ResultRow* item = staleFilesModel_->RowAt(row);
-            if (item == nullptr) {
-                continue;
-            }
-            QStringList values;
-            values << EscapeCsv(item->name)
-                   << EscapeCsv(item->size)
-                   << EscapeCsv(item->type)
-                   << EscapeCsv(item->fullPath.isEmpty() ? item->displayPath : item->fullPath);
-            file << values.join(QStringLiteral(",")).toStdWString() << L"\n";
-        }
-        SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
-        return;
-    }
     if (exportingSearch) {
-        for (int row = 0; row < searchModel_->rowCount(); ++row) {
-            const ResultRow* item = searchModel_->RowAt(row);
-            if (item == nullptr) {
-                continue;
-            }
-            QStringList values;
-            values << EscapeCsv(item->name)
-                   << EscapeCsv(item->size)
-                   << EscapeCsv(item->type)
-                   << EscapeCsv(item->fullPath.isEmpty() ? item->displayPath : item->fullPath);
-            file << values.join(QStringLiteral(",")).toStdWString() << L"\n";
+        if (searchScopeLabel_ != nullptr) {
+            searchScopeLabel_->setText(QStringLiteral("已导出 %1 项 → %2").arg(rows.size()).arg(QDir::toNativeSeparators(path)));
         }
+        UpdateSearchInfoBar();
+    } else {
         SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
-        return;
     }
-    if (exportingCleanup) {
-        for (const CleanupGroup& group : cleanupGroups_) {
-            QStringList groupValues;
-            groupValues << EscapeCsv(group.name)
-                        << EscapeCsv(ToQString(core::FormatBytes(group.bytes)))
-                        << EscapeCsv(group.risk)
-                        << EscapeCsv(group.description);
-            file << groupValues.join(QStringLiteral(",")).toStdWString() << L"\n";
-            for (std::size_t index = 0; index < group.paths.size(); ++index) {
-                const QString nativePath = QDir::toNativeSeparators(group.paths[index]);
-                const QString fileName = QFileInfo(nativePath).fileName();
-                const std::uint64_t bytes = index < group.pathBytes.size() ? group.pathBytes[index] : 0;
-                QStringList pathValues;
-                pathValues << EscapeCsv(fileName.isEmpty() ? nativePath : fileName)
-                           << EscapeCsv(ToQString(core::FormatBytes(bytes)))
-                           << EscapeCsv(group.name)
-                           << EscapeCsv(nativePath);
-                file << pathValues.join(QStringLiteral(",")).toStdWString() << L"\n";
-            }
-        }
-        SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
-        return;
-    }
-
-    for (int row = 0; row < table->rowCount(); ++row) {
-        QStringList values;
-        for (int column = 0; column < table->columnCount(); ++column) {
-            QTableWidgetItem* item = table->item(row, column);
-            QString value = item != nullptr ? item->text() : QString();
-            if (item != nullptr && column == 3) {
-                const QString fullPath = item->data(Qt::UserRole).toString();
-                if (!fullPath.isEmpty()) {
-                    value = fullPath;
-                }
-            }
-            values << EscapeCsv(value);
-        }
-        file << values.join(QStringLiteral(",")).toStdWString() << L"\n";
-    }
-
-    SetInfoBar(QStringLiteral("已导出"), 0, 0, path);
 }
 
 QTableWidget* MainWindow::CurrentTable() const {
