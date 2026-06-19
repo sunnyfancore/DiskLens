@@ -255,8 +255,8 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     request.apt.CurrentTaskFile[0] = 0xD0;   // Features = SMART READ DATA 子命令。
     request.apt.CurrentTaskFile[1] = 0x01;   // Sector Count。
     request.apt.CurrentTaskFile[2] = 0x00;   // Sector Number。
-    request.apt.CurrentTaskFile[3] = 0xC2;   // Cylinder Low(SMART 签名)。
-    request.apt.CurrentTaskFile[4] = 0x4F;   // Cylinder High(SMART 签名)。
+    request.apt.CurrentTaskFile[3] = 0x4F;   // Cylinder Low(SMART 签名必须 0x4F)。
+    request.apt.CurrentTaskFile[4] = 0xC2;   // Cylinder High(SMART 签名必须 0xC2)。
     request.apt.CurrentTaskFile[5] = 0xA0;   // Device/Head。
     request.apt.CurrentTaskFile[6] = 0xB0;   // Command = SMART。
 
@@ -269,7 +269,10 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     // DeviceIoControl 成功后,寄存器被驱动回填:CurrentTaskFile[6] 为状态寄存器,位 0(0x01)= ERR。
     const unsigned char statusReg = request.apt.CurrentTaskFile[6];
     if ((statusReg & 0x01) != 0) {
-        info.note = L"ATA SMART 命令返回错误(状态寄存器 0x" + ByteToHex(statusReg) + L")";
+        // ERR 置位:错误寄存器(CurrentTaskFile[0],常见 0x04=ABRT 命令被拒/SMART 未启用)说明原因。
+        const unsigned char errorReg = request.apt.CurrentTaskFile[0];
+        info.note = L"ATA SMART 命令返回错误(状态 0x" + ByteToHex(statusReg) +
+                    L" · 错误 0x" + ByteToHex(errorReg) + L")";
         return;
     }
     // 不再用 returned 严格校验:部分存储驱动对 ATA 直通少报返回字节数(returned 可能 < 结构+512),
