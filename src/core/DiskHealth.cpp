@@ -33,6 +33,14 @@ std::wstring AnsiOffsetToString(const unsigned char* buffer, std::size_t bufferS
 }
 
 /**
+ * @brief 把单字节格式化为两位大写十六进制 wstring(用于寄存器/错误码诊断)。
+ */
+std::wstring ByteToHex(unsigned char value) {
+    const wchar_t* digits = L"0123456789ABCDEF";
+    return std::wstring(1, digits[value >> 4]) + std::wstring(1, digits[value & 0x0F]);
+}
+
+/**
  * @brief 打开物理盘句柄;先用读写权限(ATA 直读需要),失败再回退只读。
  */
 HANDLE OpenPhysicalDrive(int diskNumber) {
@@ -238,7 +246,9 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
 
     AtaPassThroughRequest request{};
     request.apt.Length = sizeof(ATA_PASS_THROUGH_EX);
-    request.apt.AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
+    // 仅 DATA_IN:不要求 DRDY。部分消费级 SATA 控制器在 ATA_FLAGS_DRDY_REQUIRED 下会判盘未就绪而直接失败,
+    // 而多数 SMART 工具正是省略此位以扩大兼容面。
+    request.apt.AtaFlags = ATA_FLAGS_DATA_IN;
     request.apt.DataTransferLength = 512;
     request.apt.TimeOutValue = 3;
     request.apt.DataBufferOffset = offsetof(AtaPassThroughRequest, data);
@@ -253,11 +263,26 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     DWORD returned = 0;
     if (!DeviceIoControl(handle, IOCTL_ATA_PASS_THROUGH, &request, sizeof(request), &request, sizeof(request), &returned, nullptr)) {
         const DWORD err = GetLastError();
-        info.note = L"ATA SMART 直读失败(错误码 " + std::to_wstring(err) + L";USB/RAID 虚拟盘或部分控制器不支持直通)";
+        info.note = L"ATA SMART 直读失败(错误码 " + std::to_wstring(err) + L")";
         return;
     }
-    if (returned < sizeof(ATA_PASS_THROUGH_EX) + 512) {
-        info.note = L"ATA SMART 返回数据不完整(returned=" + std::to_wstring(returned) + L")";
+    // DeviceIoControl 成功后,寄存器被驱动回填:CurrentTaskFile[6] 为状态寄存器,位 0(0x01)= ERR。
+    const unsigned char statusReg = request.apt.CurrentTaskFile[6];
+    if ((statusReg & 0x01) != 0) {
+        info.note = L"ATA SMART 命令返回错误(状态寄存器 0x" + ByteToHex(statusReg) + L")";
+        return;
+    }
+    // 不再用 returned 严格校验:部分存储驱动对 ATA 直通少报返回字节数(returned 可能 < 结构+512),
+    // 但数据已实际写入缓冲;改为判缓冲是否非全零,避免误把有效数据当"不完整"丢弃。
+    bool anyNonZero = false;
+    for (std::size_t i = 0; i < sizeof(request.data); ++i) {
+        if (request.data[i] != 0) {
+            anyNonZero = true;
+            break;
+        }
+    }
+    if (!anyNonZero) {
+        info.note = L"ATA SMART 返回空数据(returned=" + std::to_wstring(returned) + L")";
         return;
     }
 

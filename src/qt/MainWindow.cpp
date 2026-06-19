@@ -6764,7 +6764,7 @@ QWidget* MainWindow::CreateHealthTab() {
 
     healthTable_ = new QTableWidget(hero);
     healthTable_->setObjectName(QStringLiteral("CleanupTree"));
-    healthTable_->setColumnCount(8);
+    healthTable_->setColumnCount(9);
     healthTable_->setHorizontalHeaderLabels({
         QStringLiteral("磁盘"),
         QStringLiteral("型号"),
@@ -6774,6 +6774,7 @@ QWidget* MainWindow::CreateHealthTab() {
         QStringLiteral("温度"),
         QStringLiteral("通电时长"),
         QStringLiteral("状态"),
+        QStringLiteral("详情"),
     });
     healthTable_->setSelectionBehavior(QAbstractItemView::SelectRows);
     healthTable_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -6786,14 +6787,15 @@ QWidget* MainWindow::CreateHealthTab() {
     healthTable_->verticalHeader()->setDefaultSectionSize(30);
     healthTable_->setHorizontalHeader(new ModernHeaderView(Qt::Horizontal, healthTable_));
     healthTable_->horizontalHeader()->setStretchLastSection(false);
-    healthTable_->setColumnWidth(0, 150);
-    healthTable_->setColumnWidth(1, 220);
-    healthTable_->setColumnWidth(2, 70);
-    healthTable_->setColumnWidth(3, 90);
-    healthTable_->setColumnWidth(4, 70);
-    healthTable_->setColumnWidth(5, 70);
-    healthTable_->setColumnWidth(6, 150);
-    healthTable_->setColumnWidth(7, 80);
+    healthTable_->setColumnWidth(0, 130);
+    healthTable_->setColumnWidth(1, 200);
+    healthTable_->setColumnWidth(2, 64);
+    healthTable_->setColumnWidth(3, 84);
+    healthTable_->setColumnWidth(4, 64);
+    healthTable_->setColumnWidth(5, 64);
+    healthTable_->setColumnWidth(6, 130);
+    healthTable_->setColumnWidth(7, 72);
+    healthTable_->setColumnWidth(8, 260);
     healthTable_->setRowCount(0);
 
     layout->addWidget(hero);
@@ -6920,6 +6922,9 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
         auto* tempItem = new QTableWidgetItem(tempText);
         auto* powerItem = new QTableWidgetItem(powerText);
         auto* statusItem = new QTableWidgetItem(statusText);
+        // 详情列:可读时显示数据来源,不可读时显示具体原因(含 Windows 错误码),便于诊断与截图反馈。
+        auto* noteItem = new QTableWidgetItem(noteText.isEmpty() ? QStringLiteral("—") : noteText);
+        noteItem->setToolTip(noteText.isEmpty() ? QString() : noteText);
 
         if (!noteText.isEmpty()) {
             statusItem->setToolTip(noteText);
@@ -6934,6 +6939,8 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
         interfaceItem->setTextAlignment(Qt::AlignCenter);
         capacityItem->setTextAlignment(Qt::AlignCenter);
         statusItem->setForeground(statusCol);
+        // 不可读取时,详情列文字同样着灰显眼,便于一眼定位诊断信息。
+        noteItem->setForeground(info.status == core::DiskHealthStatus::Unreadable ? statusCol : QColor(QStringLiteral("#8A8F98")));
         // 健康度随状态着色,便于一眼定位异常盘。
         if (info.status != core::DiskHealthStatus::Good && info.status != core::DiskHealthStatus::Unreadable) {
             healthItem->setForeground(statusCol);
@@ -6947,6 +6954,7 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
         healthTable_->setItem(row, 5, tempItem);
         healthTable_->setItem(row, 6, powerItem);
         healthTable_->setItem(row, 7, statusItem);
+        healthTable_->setItem(row, 8, noteItem);
 
         switch (info.status) {
             case core::DiskHealthStatus::Good: ++goodCount; break;
