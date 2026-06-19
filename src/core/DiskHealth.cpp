@@ -113,29 +113,29 @@ void QueryStorageDevice(HANDLE handle, std::wstring& model, std::wstring& serial
 /**
  * @brief 读取 NVMe SMART/Health 日志并填充温度/可用备用/寿命/通电。
  *
- * 输入须为编译器布局的 STORAGE_PROPERTY_QUERY + STORAGE_PROTOCOL_SPECIFIC_DATA 组合体:后者需 8 字节对齐,
- * 故不能手动按 sizeof(STORAGE_PROPERTY_QUERY)=12 偏移拼接(会落到偏移 12 而非编译器补齐的 16,驱动读错位直接失败)。
- * 这里用组合结构体让编译器算正确偏移,缓冲尾部再留 512 字节承载日志(MS stordiag 标准范式)。
+ * 输入缓冲须为微软标准布局:STORAGE_PROTOCOL_SPECIFIC_DATA 紧接 STORAGE_PROPERTY_QUERY 的
+ * AdditionalParameters 字段,即从偏移 FIELD_OFFSET(STORAGE_PROPERTY_QUERY, AdditionalParameters)=8 起。
+ * 绝不能用 sizeof(STORAGE_PROPERTY_QUERY)=12 偏移(STORAGE_PROPERTY_QUERY 仅 4 字节对齐,sizeof 恰为 12,
+ * 组合结构体给出的也是 12)——否则 ProtocolData 整体错位 4 字节,驱动按偏移 8 读到错位字段,
+ * 判参数无效返回错误码 87。缓冲尾部再留 512 字节承载 SMART/Health 日志。
  */
 void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
-    struct NvmeProtocolQuery {
-        STORAGE_PROPERTY_QUERY propertyQuery;
-        STORAGE_PROTOCOL_SPECIFIC_DATA protocolData;
-    };
-
     constexpr std::size_t logBytes = 512;
-    std::vector<unsigned char> buffer(sizeof(NvmeProtocolQuery) + logBytes, 0);
-    auto* query = reinterpret_cast<NvmeProtocolQuery*>(buffer.data());
-    // 设备级协议属性:SMART/Health 日志页属设备数据,须用 StorageDeviceProtocolSpecificProperty;
-    // 误用 StorageAdapterProtocolSpecificProperty 会被 storport 判参数无效,返回错误码 87。
-    query->propertyQuery.PropertyId = StorageDeviceProtocolSpecificProperty;
-    query->propertyQuery.QueryType = PropertyStandardQuery;
-    query->protocolData.ProtocolType = ProtocolTypeNvme;
-    query->protocolData.DataType = NVMeDataTypeLogPage;
-    query->protocolData.ProtocolDataRequestValue = 0x02;        // SMART/Health 日志页。
-    query->protocolData.ProtocolDataRequestSubValue = 0;        // NSID=0(控制器级日志)。
-    query->protocolData.ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
-    query->protocolData.ProtocolDataLength = static_cast<ULONG>(logBytes);
+    const std::size_t protocolOffset = FIELD_OFFSET(STORAGE_PROPERTY_QUERY, AdditionalParameters);
+    const std::size_t bufferSize = protocolOffset + sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + logBytes;
+    std::vector<unsigned char> buffer(bufferSize, 0);
+
+    auto* query = reinterpret_cast<STORAGE_PROPERTY_QUERY*>(buffer.data());
+    query->PropertyId = StorageDeviceProtocolSpecificProperty;   // 设备级:SMART/Health 日志属设备数据。
+    query->QueryType = PropertyStandardQuery;
+
+    auto* protocolData = reinterpret_cast<STORAGE_PROTOCOL_SPECIFIC_DATA*>(buffer.data() + protocolOffset);
+    protocolData->ProtocolType = ProtocolTypeNvme;
+    protocolData->DataType = NVMeDataTypeLogPage;
+    protocolData->ProtocolDataRequestValue = 0x02;        // SMART/Health 日志页 LID。
+    protocolData->ProtocolDataRequestSubValue = 0;        // 日志页内 DWORDDIndex,从头读。
+    protocolData->ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);  // 日志数据相对本结构起始的偏移。
+    protocolData->ProtocolDataLength = static_cast<ULONG>(logBytes);
 
     DWORD returned = 0;
     if (!DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, buffer.data(), static_cast<DWORD>(buffer.size()),
