@@ -5496,11 +5496,14 @@ void MainWindow::ApplyActionIcons() {
     // 动作类图标使用当前主题强调色，因此每次 ApplyStyle 都重新设置，使浅色 / 暗色 / 蓝色皮肤
     // 切换后图标颜色同步。内容类图标（文件夹 / 文件 / 磁盘）使用固定配色，在各处填充时设置。
     const QColor accent(g_activeTokens.accent);
+    // 主按钮（PrimaryButton）背景即强调色，图标若也注入强调色会与背景同色近乎不可见；
+    // 故主按钮图标改用按钮文字对比色（三套主题均为强调色反白），与文字同色保证可见。
+    const QColor primaryIcon(g_activeTokens.accentContrastText);
     if (browseButton_ != nullptr) {
         browseButton_->setIcon(app_icons::folderOpen(16, accent));
     }
     if (scanButton_ != nullptr) {
-        scanButton_->setIcon(app_icons::play(16, accent));
+        scanButton_->setIcon(app_icons::play(16, primaryIcon));
     }
     if (stopButton_ != nullptr) {
         stopButton_->setIcon(app_icons::stop(16, accent));
@@ -5512,10 +5515,10 @@ void MainWindow::ApplyActionIcons() {
         searchIndexButton_->setIcon(app_icons::refresh(16, accent));
     }
     if (cleanupScanButton_ != nullptr) {
-        cleanupScanButton_->setIcon(app_icons::refresh(16, accent));
+        cleanupScanButton_->setIcon(app_icons::refresh(16, primaryIcon));
     }
     if (cleanupDeleteButton_ != nullptr) {
-        cleanupDeleteButton_->setIcon(app_icons::trash(16, accent));
+        cleanupDeleteButton_->setIcon(app_icons::trash(16, primaryIcon));
     }
 
     // 侧边栏主功能导航图标：交给 UpdateModuleNavIcons 以多态像素图着色（未选灰、悬停/选中强调色）。

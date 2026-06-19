@@ -180,11 +180,29 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
         }
         return static_cast<long long>(value);
     };
-    info.powerCycleCount = readU128(72);
-    info.powerOnHours = readU128(80);
+    // NVMe SMART/Health Log Page(Log ID 02h)布局(对照 NVMe 1.4/2.0 规范):
+    //   byte 72-87  Controller Busy Time(分钟)
+    //   byte 88-103 Power Cycles           ← 通电次数
+    //   byte 104-119 Power On Hours        ← 通电时长(小时)
+    // 旧代码误读 72/80(都落在 Controller Busy Time 区),导致通电次数=忙时分钟数、
+    // 通电时长≈0。改为 88/104。
+    info.powerCycleCount = readU128(88);
+    info.powerOnHours = readU128(104);
 
-    // 状态:位 0 = 可用备用已低于阈值;位 2 = 严重可靠性降级。
-    if ((criticalWarning & 0x04) != 0) {
+    // 状态:NVMe SMART/Health Log(Log ID 02h)byte0 Critical Warning 共 5 个有效位,
+    // 对照 NVMe 1.4/2.0 规范与 Microsoft NVME_HEALTH_INFO_LOG 文档:
+    //   bit0(0x01) 可用备用低于阈值   bit1(0x02) 温度超阈值(过温)
+    //   bit2(0x04) 子系统可靠性降级   bit3(0x08) 介质进入只读模式(已锁死,拒绝写入)
+    //   bit4(0x10) 易失性备份设备失效(掉电保护电容损坏)
+    // 按严重程度优先级取最高级状态:
+    //   只读/可靠性降级 > 备份失效/过温 > 可用备用低 > 老化 > 良好。
+    // 旧实现只判 bit0/bit2,导致进入只读保护模式或过温/掉电保护失效的盘
+    // 仍可能显示 healthPercent≈100 + Good,严重误导用户。
+    if ((criticalWarning & 0x08) != 0 || (criticalWarning & 0x04) != 0) {
+        // bit3 只读 = 盘已无法写入,bit2 可靠性降级 —— 均按最严重(Warning)处理。
+        info.status = DiskHealthStatus::Warning;
+    } else if ((criticalWarning & 0x10) != 0 || (criticalWarning & 0x02) != 0) {
+        // bit4 掉电保护失效、bit1 过温 —— 可靠性事件,不应判为 Good。
         info.status = DiskHealthStatus::Warning;
     } else if ((criticalWarning & 0x01) != 0 || info.availableSparePercent < static_cast<int>(availableSpareThreshold)) {
         info.status = DiskHealthStatus::Attention;
