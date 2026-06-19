@@ -19,6 +19,7 @@
 
 class QAbstractItemView;
 class QComboBox;
+class QDateEdit;
 class QCheckBox;
 class QCloseEvent;
 class QEvent;
@@ -893,6 +894,32 @@ private:
      * @brief 快速搜索加载更多结果按钮。
      */
     QPushButton* searchLoadMoreButton_ = nullptr;
+
+    /**
+     * @brief 搜索结果筛选条：修改时间范围(全部/今天/近7天/近30天/近一年/自定义)。
+     */
+    QComboBox* searchTimeFilterCombo_ = nullptr;
+
+    /**
+     * @brief 搜索结果筛选条：文件大小范围(全部/<10MB/10-100MB/100MB-1GB/>1GB)。
+     */
+    QComboBox* searchSizeFilterCombo_ = nullptr;
+
+    /**
+     * @brief 搜索结果筛选条：仅文件/仅目录。
+     */
+    QComboBox* searchTypeFilterCombo_ = nullptr;
+
+    /**
+     * @brief 自定义修改时间起止(仅"自定义"时间时可见)。
+     */
+    QDateEdit* searchStartDateEdit_ = nullptr;
+    QDateEdit* searchEndDateEdit_ = nullptr;
+
+    /**
+     * @brief 清除全部筛选条件按钮。
+     */
+    QPushButton* searchClearFilterButton_ = nullptr;
 
     /**
      * @brief 快速搜索防抖计时器。

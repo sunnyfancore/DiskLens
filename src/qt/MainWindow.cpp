@@ -14,6 +14,7 @@
 #include <QCoreApplication>
 #include <QColor>
 #include <QDataStream>
+#include <QDateEdit>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
@@ -1943,6 +1944,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
                 case 3:
                     comparison = QString::localeAwareCompare(left.fullPath.isEmpty() ? left.displayPath : left.fullPath,
                                                              right.fullPath.isEmpty() ? right.displayPath : right.fullPath);
+                    break;
+                case 4:
+                    comparison = left.modifiedMsec < right.modifiedMsec ? -1 : (left.modifiedMsec > right.modifiedMsec ? 1 : 0);
                     break;
                 case 0:
                 default:
@@ -4206,7 +4210,95 @@ QWidget* MainWindow::CreateSearchTab() {
     searchView_->horizontalHeader()->setSectionsClickable(true);
     searchTable_ = CreateResultTable();
     searchTable_->hide();
+
+    auto* filterBar = new QFrame(page);
+    filterBar->setObjectName(QStringLiteral("InlineToolBar"));
+    auto* filterLayout = new QHBoxLayout(filterBar);
+    filterLayout->setContentsMargins(10, 0, 10, 0);
+    filterLayout->setSpacing(8);
+
+    searchTimeFilterCombo_ = new QComboBox(filterBar);
+    searchTimeFilterCombo_->addItem(QStringLiteral("全部"), QVariant(0));
+    searchTimeFilterCombo_->addItem(QStringLiteral("今天"), QVariant(1));
+    searchTimeFilterCombo_->addItem(QStringLiteral("近 7 天"), QVariant(7));
+    searchTimeFilterCombo_->addItem(QStringLiteral("近 30 天"), QVariant(30));
+    searchTimeFilterCombo_->addItem(QStringLiteral("近一年"), QVariant(365));
+    searchTimeFilterCombo_->addItem(QStringLiteral("自定义…"), QVariant(-1));
+
+    auto* dateRangeWidget = new QWidget(filterBar);
+    dateRangeWidget->setObjectName(QStringLiteral("SearchDateRange"));
+    auto* dateRangeLayout = new QHBoxLayout(dateRangeWidget);
+    dateRangeLayout->setContentsMargins(0, 0, 0, 0);
+    dateRangeLayout->setSpacing(4);
+    searchStartDateEdit_ = new QDateEdit(QDate::currentDate().addDays(-30), dateRangeWidget);
+    searchStartDateEdit_->setCalendarPopup(true);
+    searchStartDateEdit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    searchStartDateEdit_->setMaximumDate(QDate::currentDate());
+    searchEndDateEdit_ = new QDateEdit(QDate::currentDate(), dateRangeWidget);
+    searchEndDateEdit_->setCalendarPopup(true);
+    searchEndDateEdit_->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    searchEndDateEdit_->setMaximumDate(QDate::currentDate());
+    dateRangeLayout->addWidget(searchStartDateEdit_);
+    dateRangeLayout->addWidget(new QLabel(QStringLiteral("至"), dateRangeWidget));
+    dateRangeLayout->addWidget(searchEndDateEdit_);
+    dateRangeWidget->hide();
+
+    searchSizeFilterCombo_ = new QComboBox(filterBar);
+    searchSizeFilterCombo_->addItem(QStringLiteral("全部"));
+    searchSizeFilterCombo_->addItem(QStringLiteral("< 10 MB"));
+    searchSizeFilterCombo_->addItem(QStringLiteral("10–100 MB"));
+    searchSizeFilterCombo_->addItem(QStringLiteral("100 MB–1 GB"));
+    searchSizeFilterCombo_->addItem(QStringLiteral("> 1 GB"));
+
+    searchTypeFilterCombo_ = new QComboBox(filterBar);
+    searchTypeFilterCombo_->addItem(QStringLiteral("全部"));
+    searchTypeFilterCombo_->addItem(QStringLiteral("仅文件"));
+    searchTypeFilterCombo_->addItem(QStringLiteral("仅目录"));
+
+    searchClearFilterButton_ = new QPushButton(QStringLiteral("清除筛选"), filterBar);
+    searchClearFilterButton_->setObjectName(QStringLiteral("SecondaryButton"));
+
+    filterLayout->addWidget(new QLabel(QStringLiteral("时间"), filterBar));
+    filterLayout->addWidget(searchTimeFilterCombo_);
+    filterLayout->addWidget(dateRangeWidget);
+    filterLayout->addSpacing(10);
+    filterLayout->addWidget(new QLabel(QStringLiteral("大小"), filterBar));
+    filterLayout->addWidget(searchSizeFilterCombo_);
+    filterLayout->addSpacing(10);
+    filterLayout->addWidget(new QLabel(QStringLiteral("类型"), filterBar));
+    filterLayout->addWidget(searchTypeFilterCombo_);
+    filterLayout->addStretch(1);
+    filterLayout->addWidget(searchClearFilterButton_);
+
+    connect(searchTimeFilterCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this, dateRangeWidget](int) {
+        if (searchTimeFilterCombo_ != nullptr) {
+            dateRangeWidget->setVisible(searchTimeFilterCombo_->currentData().toInt() == -1);
+        }
+        ScheduleSearch();
+    });
+    connect(searchSizeFilterCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { ScheduleSearch(); });
+    connect(searchTypeFilterCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { ScheduleSearch(); });
+    connect(searchStartDateEdit_, &QDateEdit::dateChanged, this, [this](const QDate&) { ScheduleSearch(); });
+    connect(searchEndDateEdit_, &QDateEdit::dateChanged, this, [this](const QDate&) { ScheduleSearch(); });
+    connect(searchClearFilterButton_, &QPushButton::clicked, this, [this, dateRangeWidget]() {
+        if (searchTimeFilterCombo_ != nullptr) {
+            const QSignalBlocker blocker(searchTimeFilterCombo_);
+            searchTimeFilterCombo_->setCurrentIndex(0);
+        }
+        if (searchSizeFilterCombo_ != nullptr) {
+            const QSignalBlocker blocker(searchSizeFilterCombo_);
+            searchSizeFilterCombo_->setCurrentIndex(0);
+        }
+        if (searchTypeFilterCombo_ != nullptr) {
+            const QSignalBlocker blocker(searchTypeFilterCombo_);
+            searchTypeFilterCombo_->setCurrentIndex(0);
+        }
+        dateRangeWidget->hide();
+        ScheduleSearch();
+    });
+
     layout->addWidget(searchBar);
+    layout->addWidget(filterBar);
     layout->addWidget(searchView_, 1);
     return page;
 }
@@ -6281,6 +6373,45 @@ void MainWindow::PopulateSearchTable() {
 
     const std::uint64_t requestId = ++searchRequestId_;
     const QString keywordKey = keyword.toCaseFolded();
+
+    // 在 UI 线程计算筛选条件，随后按值捕获进工作线程匹配循环（线程安全）。
+    qint64 filterMinMsec = 0;
+    qint64 filterMaxMsec = std::numeric_limits<qint64>::max();
+    if (searchTimeFilterCombo_ != nullptr) {
+        const int days = searchTimeFilterCombo_->currentData().toInt();
+        if (days == 1) {
+            filterMinMsec = QDateTime(QDate::currentDate(), QTime(0, 0, 0)).toMSecsSinceEpoch();
+        } else if (days > 1) {
+            filterMinMsec = QDateTime::currentMSecsSinceEpoch() - static_cast<qint64>(days) * 86400000LL;
+        } else if (days == -1 && searchStartDateEdit_ != nullptr && searchEndDateEdit_ != nullptr) {
+            filterMinMsec = QDateTime(searchStartDateEdit_->date(), QTime(0, 0, 0)).toMSecsSinceEpoch();
+            filterMaxMsec = QDateTime(searchEndDateEdit_->date(), QTime(23, 59, 59, 999)).toMSecsSinceEpoch();
+        }
+    }
+    quint64 filterMinBytes = 0;
+    quint64 filterMaxBytes = std::numeric_limits<quint64>::max();
+    if (searchSizeFilterCombo_ != nullptr) {
+        switch (searchSizeFilterCombo_->currentIndex()) {
+        case 1:
+            filterMaxBytes = 10ULL * 1024 * 1024;
+            break;
+        case 2:
+            filterMinBytes = 10ULL * 1024 * 1024;
+            filterMaxBytes = 100ULL * 1024 * 1024;
+            break;
+        case 3:
+            filterMinBytes = 100ULL * 1024 * 1024;
+            filterMaxBytes = 1024ULL * 1024 * 1024;
+            break;
+        case 4:
+            filterMinBytes = 1024ULL * 1024 * 1024;
+            break;
+        default:
+            break;
+        }
+    }
+    const int typeMode = searchTypeFilterCombo_ != nullptr ? searchTypeFilterCombo_->currentIndex() : 0;
+
     if (searchScopeLabel_ != nullptr) {
         searchScopeLabel_->setText(QStringLiteral("搜索中：%1").arg(keyword));
     }
@@ -6288,7 +6419,7 @@ void MainWindow::PopulateSearchTable() {
     if (searchInfoLabel_ != nullptr) {
         searchInfoLabel_->setText(QStringLiteral("文件搜索 · 搜索中：%1").arg(keyword));
     }
-    std::thread([this, indexSnapshot, keyword, keywordKey, requestId]() {
+    std::thread([this, indexSnapshot, keyword, keywordKey, requestId, filterMinMsec, filterMaxMsec, filterMinBytes, filterMaxBytes, typeMode]() {
         const auto searchStartedAt = std::chrono::steady_clock::now();
         std::vector<const SearchRecord*> candidates;
         candidates.reserve(4096);
@@ -6301,6 +6432,22 @@ void MainWindow::PopulateSearchTable() {
             }
             if (!record.searchKey.contains(keywordKey)) {
                 continue;
+            }
+
+            if (record.lastModifiedMsec < filterMinMsec || record.lastModifiedMsec > filterMaxMsec) {
+                continue;
+            }
+            if (record.bytes < filterMinBytes || record.bytes >= filterMaxBytes) {
+                continue;
+            }
+            if (typeMode == 1) {
+                if (record.type == QStringLiteral("目录") || record.type == QStringLiteral("磁盘")) {
+                    continue;
+                }
+            } else if (typeMode == 2) {
+                if (record.type != QStringLiteral("目录") && record.type != QStringLiteral("磁盘")) {
+                    continue;
+                }
             }
 
             const QString normalizedPath = QDir::fromNativeSeparators(record.path).toCaseFolded();
