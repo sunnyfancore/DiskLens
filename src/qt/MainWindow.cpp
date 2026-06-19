@@ -300,6 +300,11 @@ struct ThemeTokens {
     QString danger;
 
     /**
+     * @brief 加载遮罩半透明背景(rgba 字符串,随主题底色暗化内容)。
+     */
+    QString overlayScrim;
+
+    /**
      * @brief 卡片圆角像素。
      */
     int cardRadius = 10;
@@ -308,6 +313,11 @@ struct ThemeTokens {
      * @brief 按钮与输入框圆角像素。
      */
     int controlRadius = 6;
+
+    /**
+     * @brief 进度条与轨道圆角像素。
+     */
+    int trackRadius = 3;
 
     /**
      * @brief 胶囊型徽章圆角像素。
@@ -352,6 +362,7 @@ ThemeTokens ResolveThemeTokens(const QString& themeName) {
     ThemeTokens t;
     t.cardRadius = 10;
     t.controlRadius = 6;
+    t.trackRadius = 3;
     t.pillRadius = 14;
     t.rowHeight = 28;
     // 度量/字号/尺寸不随主题变化,三套主题取相同值。
@@ -392,6 +403,7 @@ ThemeTokens ResolveThemeTokens(const QString& themeName) {
         t.good = QStringLiteral("#34d399");
         t.warn = QStringLiteral("#fbbf24");
         t.danger = QStringLiteral("#f87171");
+        t.overlayScrim = QStringLiteral("rgba(15, 23, 42, 110)");
         return t;
     }
 
@@ -425,6 +437,7 @@ ThemeTokens ResolveThemeTokens(const QString& themeName) {
         t.good = QStringLiteral("#059669");
         t.warn = QStringLiteral("#d97706");
         t.danger = QStringLiteral("#dc2626");
+        t.overlayScrim = QStringLiteral("rgba(15, 23, 42, 110)");
         return t;
     }
 
@@ -458,6 +471,7 @@ ThemeTokens ResolveThemeTokens(const QString& themeName) {
     t.good = QStringLiteral("#059669");
     t.warn = QStringLiteral("#d97706");
     t.danger = QStringLiteral("#dc2626");
+    t.overlayScrim = QStringLiteral("rgba(15, 23, 42, 110)");
     return t;
 }
 
@@ -4894,13 +4908,13 @@ void MainWindow::ApplyStyle() {
             font-weight: 700;
         }
         QFrame#LoadingOverlay {
-            background: rgba(15, 23, 42, 110);
+            background: @overlayScrim;
             border: none;
         }
         QFrame#LoadingCard {
             background: @cardBg;
             border: 1px solid @cardBorder;
-            border-radius: 12px;
+            border-radius: @cardRadius px;
         }
         QLabel#LoadingSpinner {
             color: @accent;
@@ -4919,11 +4933,11 @@ void MainWindow::ApplyStyle() {
         QProgressBar#LoadingProgress {
             background: @cardBorder;
             border: none;
-            border-radius: 3px;
+            border-radius: @trackRadius px;
         }
         QProgressBar#LoadingProgress::chunk {
             background: @accent;
-            border-radius: 3px;
+            border-radius: @trackRadius px;
         }
 )"
         R"(
@@ -5317,12 +5331,12 @@ void MainWindow::ApplyStyle() {
         QProgressBar {
             background: @cardBorder;
             border: none;
-            border-radius: 3px;
+            border-radius: @trackRadius px;
             color: @textPrimary;
         }
         QProgressBar::chunk {
             background: @accent;
-            border-radius: 3px;
+            border-radius: @trackRadius px;
         }
         QGroupBox {
             color: @textSecondary;
@@ -5382,10 +5396,10 @@ void MainWindow::ApplyStyle() {
         QProgressBar#HealthBar {
             background: @cardBorder;
             border: none;
-            border-radius: 3px;
+            border-radius: @trackRadius px;
         }
         QProgressBar#HealthBar::chunk {
-            border-radius: 3px;
+            border-radius: @trackRadius px;
             background: @textMuted;
         }
         QProgressBar#HealthBar[statusProp="good"]::chunk { background: @good; }
@@ -5426,7 +5440,9 @@ void MainWindow::ApplyStyle() {
         .replace(QStringLiteral("@good"), t.good)
         .replace(QStringLiteral("@warn"), t.warn)
         .replace(QStringLiteral("@danger"), t.danger)
+        .replace(QStringLiteral("@overlayScrim"), t.overlayScrim)
         .replace(QStringLiteral("@controlRadius"), QString::number(t.controlRadius))
+        .replace(QStringLiteral("@trackRadius"), QString::number(t.trackRadius))
         .replace(QStringLiteral("@cardRadius"), QString::number(t.cardRadius))
         .replace(QStringLiteral("@pillRadius"), QString::number(t.pillRadius))
         .replace(QStringLiteral("@rowHeight"), QString::number(t.rowHeight))
@@ -6973,10 +6989,10 @@ void MainWindow::ShowHealthDetailDialog(int row) {
 
     auto statusColor = [](core::DiskHealthStatus status) -> QColor {
         switch (status) {
-            case core::DiskHealthStatus::Good: return QColor(QStringLiteral("#3FA34D"));
-            case core::DiskHealthStatus::Attention: return QColor(QStringLiteral("#E8A33D"));
-            case core::DiskHealthStatus::Warning: return QColor(QStringLiteral("#E0473E"));
-            default: return QColor(QStringLiteral("#8A8F98"));
+            case core::DiskHealthStatus::Good: return QColor(g_activeTokens.good);
+            case core::DiskHealthStatus::Attention: return QColor(g_activeTokens.warn);
+            case core::DiskHealthStatus::Warning: return QColor(g_activeTokens.danger);
+            default: return QColor(g_activeTokens.textMuted);
         }
     };
 
