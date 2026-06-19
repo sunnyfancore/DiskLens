@@ -1033,16 +1033,6 @@ private:
     QLabel* healthInfoLabel_ = nullptr;
 
     /**
-     * @brief 刷新磁盘健康按钮(触发后台 SMART 读取)。
-     */
-    QPushButton* healthRefreshButton_ = nullptr;
-
-    /**
-     * @brief 取消正在进行的磁盘健康读取。
-     */
-    QPushButton* healthCancelButton_ = nullptr;
-
-    /**
      * @brief 长期未动文件虚拟结果表。
      */
     QTableView* staleFilesView_ = nullptr;

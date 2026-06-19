@@ -3984,7 +3984,7 @@ QWidget* MainWindow::CreateWorkspace() {
     directoryView_->verticalHeader()->setVisible(false);
     directoryView_->verticalHeader()->setDefaultSectionSize(28);
     directoryView_->horizontalHeader()->setStretchLastSection(false);
-    directoryView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    directoryView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     directoryView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     directoryView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     directoryView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -4011,7 +4011,7 @@ QWidget* MainWindow::CreateWorkspace() {
     largeFilesView_->verticalHeader()->setVisible(false);
     largeFilesView_->verticalHeader()->setDefaultSectionSize(28);
     largeFilesView_->horizontalHeader()->setStretchLastSection(false);
-    largeFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    largeFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     largeFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     largeFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     largeFilesView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -4045,7 +4045,7 @@ QWidget* MainWindow::CreateWorkspace() {
     staleFilesView_->verticalHeader()->setVisible(false);
     staleFilesView_->verticalHeader()->setDefaultSectionSize(28);
     staleFilesView_->horizontalHeader()->setStretchLastSection(false);
-    staleFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    staleFilesView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     staleFilesView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     staleFilesView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     staleFilesView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -4237,7 +4237,7 @@ QTableWidget* MainWindow::CreateResultTable() {
     table->verticalHeader()->setVisible(false);
     table->verticalHeader()->setDefaultSectionSize(28);
     table->horizontalHeader()->setStretchLastSection(false);
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -4289,7 +4289,7 @@ QWidget* MainWindow::CreateSearchTab() {
     searchView_->verticalHeader()->setVisible(false);
     searchView_->verticalHeader()->setDefaultSectionSize(28);
     searchView_->horizontalHeader()->setStretchLastSection(false);
-    searchView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    searchView_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     searchView_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     searchView_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     searchView_->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -4536,7 +4536,7 @@ QWidget* MainWindow::CreateCleanupTab() {
     cleanupTree_->setIndentation(22);
     cleanupTree_->setIconSize(QSize(16, 16));
     cleanupTree_->header()->setStretchLastSection(false);
-    cleanupTree_->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    cleanupTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     cleanupTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     cleanupTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     cleanupTree_->header()->setSectionResizeMode(3, QHeaderView::Stretch);
@@ -5357,6 +5357,11 @@ void MainWindow::ApplyStyle() {
             border: 1px solid @cardBorder;
             border-radius: @cardRadius;
         }
+        QFrame#HealthCardMeter {
+            background: @windowBg;
+            border: 1px solid @cardBorder;
+            border-radius: @controlRadius;
+        }
         QLabel#HealthCardModel {
             color: @textPrimary;
             font-size: @fsTitle pt;
@@ -5372,20 +5377,20 @@ void MainWindow::ApplyStyle() {
         }
         QLabel#HealthCardVal {
             color: @textPrimary;
-            font-size: @fsBody pt;
+            font-size: @fsLabel pt;
             font-weight: 600;
         }
         QLabel#HealthCardPct {
             color: @textPrimary;
-            font-size: @fsLabel pt;
-            font-weight: 600;
+            font-size: @fsH1 pt;
+            font-weight: 700;
         }
         QLabel#HealthBadge {
             color: #ffffff;
             background: @textMuted;
             border: none;
             border-radius: @pillRadius;
-            padding: 1px @spaceSm px;
+            padding: 2px @spaceSm px;
             font-size: @fsCaption pt;
             font-weight: 600;
         }
@@ -5393,19 +5398,6 @@ void MainWindow::ApplyStyle() {
         QLabel#HealthBadge[statusProp="warn"] { background: @warn; }
         QLabel#HealthBadge[statusProp="danger"] { background: @danger; }
         QLabel#HealthBadge[statusProp="muted"] { background: @textMuted; }
-        QProgressBar#HealthBar {
-            background: @cardBorder;
-            border: none;
-            border-radius: @trackRadius px;
-        }
-        QProgressBar#HealthBar::chunk {
-            border-radius: @trackRadius px;
-            background: @textMuted;
-        }
-        QProgressBar#HealthBar[statusProp="good"]::chunk { background: @good; }
-        QProgressBar#HealthBar[statusProp="warn"]::chunk { background: @warn; }
-        QProgressBar#HealthBar[statusProp="danger"]::chunk { background: @danger; }
-        QProgressBar#HealthBar[statusProp="muted"]::chunk { background: @textMuted; }
     )");
 
     // 注意：必须先替换更长的占位符再替换其前缀（如 @accentSoftBorder 先于 @accentSoft 先于 @accent），
@@ -5593,30 +5585,6 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         for (const EmptyOverlayEntry& entry : emptyOverlays_) {
             if (entry.overlay->isVisible() && entry.view->viewport() == watched) {
                 entry.overlay->setGeometry(entry.view->viewport()->rect());
-            }
-        }
-    }
-    // 健康卡片:整卡双击进详情、右键弹菜单。事件可能来自卡片或其任意子控件,
-    // 沿 parent 链向上找到挂了 healthRow 属性的卡片后按序号触发。
-    if (type == QEvent::MouseButtonDblClick || type == QEvent::ContextMenu) {
-        const QObject* obj = watched;
-        while (obj != nullptr && !obj->property("healthRow").isValid()) {
-            obj = obj->parent();
-        }
-        if (obj != nullptr) {
-            const int row = obj->property("healthRow").toInt();
-            if (row >= 0 && row < static_cast<int>(healthInfos_.size())) {
-                if (type == QEvent::MouseButtonDblClick) {
-                    ShowHealthDetailDialog(row);
-                    return true;
-                }
-                auto* menuEvent = static_cast<QContextMenuEvent*>(event);
-                QMenu menu(this);
-                menu.addAction(QStringLiteral("查看详情"), this, [this, row]() { ShowHealthDetailDialog(row); });
-                menu.addSeparator();
-                menu.addAction(QStringLiteral("刷新健康信息"), this, [this]() { RefreshDiskHealth(); });
-                menu.exec(menuEvent->globalPos());
-                return true;
             }
         }
     }
@@ -6933,23 +6901,11 @@ QWidget* MainWindow::CreateHealthTab() {
     healthStatusLabel_->setObjectName(QStringLiteral("CleanupStatus"));
     healthStatusLabel_->setWordWrap(true);
 
-    healthRefreshButton_ = new QPushButton(QStringLiteral("读取健康信息"), hero);
-    healthRefreshButton_->setObjectName(QStringLiteral("PrimaryButton"));
-    healthRefreshButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
-    healthCancelButton_ = new QPushButton(QStringLiteral("取消"), hero);
-    healthCancelButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
-    healthCancelButton_->hide();
-
     auto* titleBlock = new QVBoxLayout();
     titleBlock->setSpacing(2);
     titleBlock->addWidget(titleLabel);
     titleBlock->addWidget(healthStatusLabel_);
-    auto* headerLayout = new QHBoxLayout();
-    headerLayout->setSpacing(12);
-    headerLayout->addLayout(titleBlock, 1);
-    headerLayout->addWidget(healthCancelButton_);
-    headerLayout->addWidget(healthRefreshButton_);
-    heroLayout->addLayout(headerLayout);
+    heroLayout->addLayout(titleBlock);
 
     // 卡片滚动容器:每盘一卡,竖向排列;卡片超出视口时纵向滚动,横向不滚动。
     healthScroll_ = new QScrollArea(page);
@@ -6963,7 +6919,7 @@ QWidget* MainWindow::CreateHealthTab() {
     healthCardsLayout_->setContentsMargins(g_activeTokens.spaceLg, g_activeTokens.spaceMd, g_activeTokens.spaceLg, g_activeTokens.spaceMd);
     healthCardsLayout_->setSpacing(g_activeTokens.spaceMd);
     healthEmptyHint_ = new QLabel(
-        QStringLiteral("点击「读取健康信息」开始检测各物理盘的 SMART / NVMe 健康状态。读取物理盘需要管理员权限。"),
+        QStringLiteral("正在读取各物理盘的 SMART / NVMe 健康信息……\n读取物理盘需要管理员权限。"),
         healthCardsHost_);
     healthEmptyHint_->setObjectName(QStringLiteral("EmptyStateHint"));
     healthEmptyHint_->setWordWrap(true);
@@ -6974,9 +6930,6 @@ QWidget* MainWindow::CreateHealthTab() {
 
     layout->addWidget(hero);
     layout->addWidget(healthScroll_, 1);
-
-    connect(healthRefreshButton_, &QPushButton::clicked, this, [this]() { RefreshDiskHealth(); });
-    connect(healthCancelButton_, &QPushButton::clicked, this, [this]() { CancelDiskHealth(); });
 
     return page;
 }
@@ -7110,12 +7063,6 @@ void MainWindow::RefreshDiskHealth() {
 
     healthQueryCancel_.store(false);
     healthQuerying_.store(true);
-    if (healthRefreshButton_ != nullptr) {
-        healthRefreshButton_->setEnabled(false);
-    }
-    if (healthCancelButton_ != nullptr) {
-        healthCancelButton_->show();
-    }
     if (healthStatusLabel_ != nullptr) {
         healthStatusLabel_->setText(QStringLiteral("正在读取物理盘健康信息(SMART / NVMe),请稍候……"));
     }
@@ -7131,12 +7078,6 @@ void MainWindow::RefreshDiskHealth() {
             const bool cancelled = healthQueryCancel_.load();
             healthQuerying_.store(false);
             healthQueryCancel_.store(false);
-            if (healthRefreshButton_ != nullptr) {
-                healthRefreshButton_->setEnabled(true);
-            }
-            if (healthCancelButton_ != nullptr) {
-                healthCancelButton_->hide();
-            }
             if (cancelled) {
                 if (healthStatusLabel_ != nullptr) {
                     healthStatusLabel_->setText(QStringLiteral("已取消读取。点「读取健康信息」重新开始。"));
@@ -7159,25 +7100,16 @@ void MainWindow::CancelDiskHealth() {
     }
 }
 
-// 把卡片及其所有子控件都挂上事件过滤器,使整卡(含文字、进度条、徽章)双击进详情、右键弹菜单。
-static void InstallHealthCardFilter(QObject* filter, QObject* obj) {
-    obj->installEventFilter(filter);
-    const auto children = obj->children();
-    for (QObject* child : children) {
-        if (child->isWidgetType()) {
-            InstallHealthCardFilter(filter, child);
-        }
-    }
-}
-
 void MainWindow::PopulateHealthCards(const std::vector<disk_lens::core::DiskHealthInfo>& infos) {
     if (healthCardsLayout_ == nullptr) {
         return;
     }
     healthInfos_ = infos;
 
-    // 清空旧卡片(healthEmptyHint_ 之外的所有直接子 QFrame);同步删除,布局随之自动移除其条目。
-    const auto oldCards = healthCardsHost_->findChildren<QFrame*>(QString(), Qt::FindDirectChildrenOnly);
+    // 清空旧卡片:只删 objectName 为 HealthCard 的直接子 QFrame。
+    // 关键:healthEmptyHint_ 是 QLabel(QLabel 继承自 QFrame),会被 findChildren<QFrame*> 一并捕获;
+    // 若误删,成员指针悬垂,后续 setVisible/addWidget 触发 use-after-free 崩溃。必须按 objectName 过滤排除。
+    const auto oldCards = healthCardsHost_->findChildren<QFrame*>(QStringLiteral("HealthCard"), Qt::FindDirectChildrenOnly);
     for (QFrame* card : oldCards) {
         delete card;
     }
@@ -7232,15 +7164,27 @@ void MainWindow::PopulateHealthCards(const std::vector<disk_lens::core::DiskHeal
 QFrame* MainWindow::BuildHealthCard(const disk_lens::core::DiskHealthInfo& info, int row) {
     auto* card = new QFrame(healthCardsHost_);
     card->setObjectName(QStringLiteral("HealthCard"));
-    card->setProperty("healthRow", row);
 
-    // 状态映射到 QSS 属性 statusProp,统一驱动徽章与健康度条着色。
+    // 状态映射:statusProp 驱动徽章与卡片着色;statusColor 内联给进度条 chunk,避开 QSS 子控件属性选择器。
     QString statusProp;
+    QColor statusColor;
     switch (info.status) {
-        case core::DiskHealthStatus::Good: statusProp = QStringLiteral("good"); break;
-        case core::DiskHealthStatus::Attention: statusProp = QStringLiteral("warn"); break;
-        case core::DiskHealthStatus::Warning: statusProp = QStringLiteral("danger"); break;
-        default: statusProp = QStringLiteral("muted"); break;
+        case core::DiskHealthStatus::Good:
+            statusProp = QStringLiteral("good");
+            statusColor = QColor(g_activeTokens.good);
+            break;
+        case core::DiskHealthStatus::Attention:
+            statusProp = QStringLiteral("warn");
+            statusColor = QColor(g_activeTokens.warn);
+            break;
+        case core::DiskHealthStatus::Warning:
+            statusProp = QStringLiteral("danger");
+            statusColor = QColor(g_activeTokens.danger);
+            break;
+        default:
+            statusProp = QStringLiteral("muted");
+            statusColor = QColor(g_activeTokens.textMuted);
+            break;
     }
     card->setProperty("statusProp", statusProp);
 
@@ -7260,76 +7204,89 @@ QFrame* MainWindow::BuildHealthCard(const disk_lens::core::DiskHealthInfo& info,
     const QString lettersText = info.driveLetters.empty() ? QString() : ToQString(info.driveLetters);
     const QString noteText = info.note.empty() ? QString() : ToQString(info.note);
 
-    QString diskTitle = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
+    // 副标题:物理盘号 · 盘符 · 接口 · 容量(单行,超长靠 tooltip 与省略,不换行以规避滚动区 layout 循环)。
+    QString subText = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
     if (!lettersText.isEmpty()) {
-        diskTitle += QStringLiteral(" · ") + lettersText;
+        subText += QStringLiteral("  ·  ") + lettersText;
     }
+    subText += QStringLiteral("  ·  ") + interfaceText + QStringLiteral("  ·  ") + capacityText;
 
-    auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(g_activeTokens.spaceLg, g_activeTokens.spaceMd, g_activeTokens.spaceLg, g_activeTokens.spaceMd);
-    cardLayout->setSpacing(g_activeTokens.spaceMd);
+    auto* root = new QVBoxLayout(card);
+    root->setContentsMargins(g_activeTokens.spaceLg, g_activeTokens.spaceLg, g_activeTokens.spaceLg, g_activeTokens.spaceLg);
+    root->setSpacing(g_activeTokens.spaceMd);
 
-    // 顶部行:磁盘图标 + 标题(物理盘号 / 盘符)+ 状态徽章;下方副标题(型号 · 接口 · 容量)。
+    // 头部:磁盘图标 + 型号(大标题)+ 副标题 + 状态药丸。
     auto* iconLabel = new QLabel(card);
-    iconLabel->setPixmap(app_icons::drive(32).pixmap(32, 32));
-    auto* titleLabel = new QLabel(diskTitle, card);
+    iconLabel->setPixmap(app_icons::drive(40).pixmap(40, 40));
+    auto* titleLabel = new QLabel(modelText, card);
     titleLabel->setObjectName(QStringLiteral("HealthCardModel"));
-    titleLabel->setToolTip(noteText.isEmpty() ? diskTitle : diskTitle + QStringLiteral("\n") + noteText);
+    titleLabel->setToolTip(noteText.isEmpty() ? modelText : modelText + QStringLiteral("\n") + noteText);
+    auto* subLabel = new QLabel(subText, card);
+    subLabel->setObjectName(QStringLiteral("HealthCardSub"));
+    subLabel->setToolTip(subText);
     auto* badgeLabel = new QLabel(statusText, card);
     badgeLabel->setObjectName(QStringLiteral("HealthBadge"));
     badgeLabel->setProperty("statusProp", statusProp);
     badgeLabel->setAlignment(Qt::AlignCenter);
     badgeLabel->setToolTip(noteText.isEmpty() ? statusText : noteText);
-    auto* titleRow = new QHBoxLayout();
-    titleRow->setSpacing(g_activeTokens.spaceSm);
-    titleRow->addWidget(titleLabel, 1);
-    titleRow->addWidget(badgeLabel);
-    auto* subLabel = new QLabel(modelText + QStringLiteral("  ·  ") + interfaceText + QStringLiteral("  ·  ") + capacityText, card);
-    subLabel->setObjectName(QStringLiteral("HealthCardSub"));
-    subLabel->setWordWrap(true);
-    auto* infoBlock = new QVBoxLayout();
-    infoBlock->setSpacing(g_activeTokens.spaceXs);
-    infoBlock->addLayout(titleRow);
-    infoBlock->addWidget(subLabel);
-    auto* topRow = new QHBoxLayout();
-    topRow->setSpacing(g_activeTokens.spaceMd);
-    topRow->addWidget(iconLabel, 0, Qt::AlignTop);
-    topRow->addLayout(infoBlock, 1);
-    cardLayout->addLayout(topRow);
+    auto* titleBlock = new QVBoxLayout();
+    titleBlock->setSpacing(g_activeTokens.spaceXs);
+    titleBlock->addWidget(titleLabel);
+    titleBlock->addWidget(subLabel);
+    auto* head = new QHBoxLayout();
+    head->setSpacing(g_activeTokens.spaceMd);
+    head->addWidget(iconLabel, 0, Qt::AlignVCenter);
+    head->addLayout(titleBlock, 1);
+    head->addWidget(badgeLabel, 0, Qt::AlignTop);
+    root->addLayout(head);
 
-    // 健康度行:标签 + 进度条 + 百分比。
-    auto* healthCaption = new QLabel(QStringLiteral("健康度"), card);
-    healthCaption->setObjectName(QStringLiteral("HealthCardKey"));
-    auto* healthBar = new QProgressBar(card);
+    // 健康度区块:独立浅底小块,标签 + 大百分比 + 进度条(chunk 内联着色,规避 QSS 子控件属性选择器)。
+    auto* meterBox = new QFrame(card);
+    meterBox->setObjectName(QStringLiteral("HealthCardMeter"));
+    auto* meterLayout = new QVBoxLayout(meterBox);
+    meterLayout->setContentsMargins(g_activeTokens.spaceMd, g_activeTokens.spaceSm, g_activeTokens.spaceMd, g_activeTokens.spaceSm);
+    meterLayout->setSpacing(g_activeTokens.spaceXs);
+    auto* meterHead = new QHBoxLayout();
+    auto* meterCaption = new QLabel(QStringLiteral("健康度"), meterBox);
+    meterCaption->setObjectName(QStringLiteral("HealthCardKey"));
+    auto* pctLabel = new QLabel(healthText, meterBox);
+    pctLabel->setObjectName(QStringLiteral("HealthCardPct"));
+    pctLabel->setToolTip(noteText);
+    meterHead->addWidget(meterCaption);
+    meterHead->addStretch(1);
+    meterHead->addWidget(pctLabel);
+    auto* healthBar = new QProgressBar(meterBox);
     healthBar->setObjectName(QStringLiteral("HealthBar"));
-    healthBar->setProperty("statusProp", statusProp);
     healthBar->setRange(0, 100);
     healthBar->setValue(info.healthPercent >= 0 ? info.healthPercent : 0);
     healthBar->setTextVisible(false);
     healthBar->setFixedHeight(8);
-    auto* pctLabel = new QLabel(healthText, card);
-    pctLabel->setObjectName(QStringLiteral("HealthCardPct"));
-    pctLabel->setMinimumWidth(48);
-    auto* healthRow = new QHBoxLayout();
-    healthRow->setSpacing(g_activeTokens.spaceSm);
-    healthRow->addWidget(healthCaption);
-    healthRow->addWidget(healthBar, 1);
-    healthRow->addWidget(pctLabel);
-    cardLayout->addLayout(healthRow);
+    healthBar->setStyleSheet(QStringLiteral(
+        "QProgressBar{background:%1;border:none;border-radius:%2px;}"
+        "QProgressBar::chunk{background:%3;border-radius:%2px;}")
+        .arg(g_activeTokens.cardBorder)
+        .arg(g_activeTokens.trackRadius)
+        .arg(statusColor.name()));
+    meterLayout->addLayout(meterHead);
+    meterLayout->addWidget(healthBar);
+    root->addWidget(meterBox);
 
-    // 指标网格:两列键值,温度 / 通电时长 / 通电次数 / 可用备用 / 重映射 / 待映射 / 离线无法校正。
+    // 指标网格:键(灰小)在上、值(粗)在下,两列均匀分布。
     auto* grid = new QGridLayout();
-    grid->setHorizontalSpacing(g_activeTokens.spaceLg);
-    grid->setVerticalSpacing(g_activeTokens.spaceXs);
+    grid->setHorizontalSpacing(g_activeTokens.spaceXl);
+    grid->setVerticalSpacing(g_activeTokens.spaceSm);
+    grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
-    grid->setColumnStretch(3, 1);
-    auto addMetric = [&card, grid](int r, int c, const QString& key, const QString& val) {
+    auto addMetric = [card, grid](int r, int c, const QString& key, const QString& val) {
         auto* k = new QLabel(key, card);
         k->setObjectName(QStringLiteral("HealthCardKey"));
         auto* v = new QLabel(val, card);
         v->setObjectName(QStringLiteral("HealthCardVal"));
-        grid->addWidget(k, r, c * 2);
-        grid->addWidget(v, r, c * 2 + 1);
+        auto* cell = new QVBoxLayout();
+        cell->setSpacing(0);
+        cell->addWidget(k);
+        cell->addWidget(v);
+        grid->addLayout(cell, r, c);
     };
     addMetric(0, 0, QStringLiteral("温度"), tempText);
     addMetric(0, 1, QStringLiteral("通电时长"), powerText);
@@ -7338,10 +7295,20 @@ QFrame* MainWindow::BuildHealthCard(const disk_lens::core::DiskHealthInfo& info,
     addMetric(2, 0, QStringLiteral("重映射扇区"), reallocatedText);
     addMetric(2, 1, QStringLiteral("当前待映射"), pendingText);
     addMetric(3, 0, QStringLiteral("离线无法校正"), uncorrectableText);
-    cardLayout->addLayout(grid);
+    root->addLayout(grid);
 
-    // 整卡双击进详情、右键弹菜单(由 eventFilter 统一处理)。
-    InstallHealthCardFilter(this, card);
+    // 右键卡片弹菜单(详情 / 刷新),替代递归事件过滤器,降低运行时复杂度。
+    card->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(card, &QWidget::customContextMenuRequested, this, [this, row, card](const QPoint& pos) {
+        if (row >= 0 && row < static_cast<int>(healthInfos_.size())) {
+            QMenu menu(this);
+            menu.addAction(QStringLiteral("查看详情"), this, [this, row]() { ShowHealthDetailDialog(row); });
+            menu.addSeparator();
+            menu.addAction(QStringLiteral("刷新健康信息"), this, [this]() { RefreshDiskHealth(); });
+            menu.exec(card->mapToGlobal(pos));
+        }
+    });
+
     return card;
 }
 
@@ -7403,7 +7370,7 @@ QWidget* MainWindow::CreateDuplicateTab() {
     duplicateTree_->setIndentation(22);
     duplicateTree_->setIconSize(QSize(16, 16));
     duplicateTree_->header()->setStretchLastSection(false);
-    duplicateTree_->header()->setSectionResizeMode(0, QHeaderView::Interactive);
+    duplicateTree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     duplicateTree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     duplicateTree_->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     duplicateTree_->header()->setSectionResizeMode(3, QHeaderView::Stretch);
