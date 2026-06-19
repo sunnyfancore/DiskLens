@@ -316,6 +316,29 @@ struct ThemeTokens {
      * @brief 表格行高像素。
      */
     int rowHeight = 28;
+
+    // —— 间距令牌(4 的倍数体系,不随主题变化)——
+    int spaceXs = 4;       // 图标与文字、紧凑组件细距。
+    int spaceSm = 8;       // 卡片内常规间距、按钮组间距。
+    int spaceMd = 12;      // 卡片分段间距、hero 间距。
+    int spaceLg = 16;      // hero 内边距、主要间距。
+    int spaceXl = 20;      // 对话框常规内边距。
+    int spaceDialog = 24;  // 大对话框内边距。
+    int space2xl = 32;     // 全屏空状态内边距。
+
+    // —— 字号令牌 pt(不随主题变化)——
+    int fsCaption = 9;   // 次要说明、版本号、页脚。
+    int fsBody = 10;     // 正文。
+    int fsLabel = 11;    // 按钮、导航、表单标签。
+    int fsTitle = 13;    // 卡片标题、指标值。
+    int fsH1 = 15;       // 强调大数值。
+    int fsDisplay = 22;  // 首屏大字。
+
+    // —— 控件尺寸令牌 px(不随主题变化)——
+    int controlHeight = 28;        // 通用按钮/输入框最小高度。
+    int navButtonHeight = 52;      // 导航按钮高度。
+    int primaryButtonHeight = 40;  // 主操作按钮高度。
+    int primaryButtonMinW = 132;   // 主操作按钮最小宽度。
 };
 
 /**
@@ -329,6 +352,13 @@ ThemeTokens ResolveThemeTokens(const QString& themeName) {
     t.controlRadius = 6;
     t.pillRadius = 14;
     t.rowHeight = 28;
+    // 度量/字号/尺寸不随主题变化,三套主题取相同值。
+    t.spaceXs = 4; t.spaceSm = 8; t.spaceMd = 12; t.spaceLg = 16;
+    t.spaceXl = 20; t.spaceDialog = 24; t.space2xl = 32;
+    t.fsCaption = 9; t.fsBody = 10; t.fsLabel = 11; t.fsTitle = 13;
+    t.fsH1 = 15; t.fsDisplay = 22;
+    t.controlHeight = 28; t.navButtonHeight = 52;
+    t.primaryButtonHeight = 40; t.primaryButtonMinW = 132;
 
     if (themeName == QStringLiteral("dark")) {
         t.windowBg = QStringLiteral("#0f172a");
@@ -4358,11 +4388,10 @@ QWidget* MainWindow::CreateCleanupTab() {
     // 主操作「扫描垃圾」：加大尺寸的强调主按钮，置于头部右侧，作为本页首要动作。
     cleanupScanButton_ = new QPushButton(QStringLiteral("扫描垃圾"), hero);
     cleanupScanButton_->setObjectName(QStringLiteral("PrimaryButton"));
-    cleanupScanButton_->setMinimumHeight(44);
-    cleanupScanButton_->setMinimumWidth(132);
+    cleanupScanButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
+    cleanupScanButton_->setMinimumWidth(g_activeTokens.primaryButtonMinW);
     QFont scanButtonFont = cleanupScanButton_->font();
-    scanButtonFont.setPointSize(11);
-    scanButtonFont.setBold(true);
+    scanButtonFont.setPointSize(g_activeTokens.fsLabel);
     cleanupScanButton_->setFont(scanButtonFont);
 
     cleanupPrivacyCheckBox_ = new QCheckBox(QStringLiteral("隐私痕迹"), hero);
@@ -4686,7 +4715,7 @@ void MainWindow::ApplyStyle() {
         QMainWindow {
             background: @windowBg;
             font-family: "Microsoft YaHei UI", "Segoe UI";
-            font-size: 9.5pt;
+            font-size: @fsBody;
             color: @textPrimary;
         }
         QLabel {
@@ -4723,14 +4752,14 @@ void MainWindow::ApplyStyle() {
 
         /* 左侧功能导航 */
         QPushButton#ModuleNavButton {
-            min-height: 52px;
+            min-height: @navButtonHeight;
             padding: 0 14px 0 12px;
             border: none;
             border-left: 3px solid transparent;
             border-radius: @controlRadius;
             background: transparent;
             color: @textSecondary;
-            font-size: 11pt;
+            font-size: @fsLabel;
             font-weight: 600;
             text-align: left;
         }
@@ -4757,7 +4786,7 @@ void MainWindow::ApplyStyle() {
             border: none;
         }
         QPushButton#MenuStripButton {
-            min-height: 28px;
+            min-height: @controlHeight;
             padding: 0 12px;
             border: none;
             border-radius: 0;
@@ -4797,7 +4826,7 @@ void MainWindow::ApplyStyle() {
         }
         QLabel#CleanupTitle {
             color: @textPrimary;
-            font-size: 13pt;
+            font-size: @fsTitle;
             font-weight: 700;
         }
         QLabel#CleanupStatus {
@@ -4805,17 +4834,17 @@ void MainWindow::ApplyStyle() {
         }
         QLabel#CleanupTotal {
             color: @accent;
-            font-size: 11pt;
+            font-size: @fsLabel;
             font-weight: 700;
         }
         QLabel#CleanupGood {
             color: @good;
-            font-size: 11pt;
+            font-size: @fsLabel;
             font-weight: 700;
         }
         QLabel#CleanupWarn {
             color: @warn;
-            font-size: 11pt;
+            font-size: @fsLabel;
             font-weight: 700;
         }
         QFrame#CleanupSectionPanel {
@@ -4859,17 +4888,17 @@ void MainWindow::ApplyStyle() {
         }
         QLabel#LoadingSpinner {
             color: @accent;
-            font-size: 22pt;
+            font-size: @fsDisplay;
             font-weight: 700;
         }
         QLabel#LoadingTitle {
             color: @textPrimary;
-            font-size: 13pt;
+            font-size: @fsTitle;
             font-weight: 700;
         }
         QLabel#LoadingDetail {
             color: @textSecondary;
-            font-size: 9pt;
+            font-size: @fsCaption;
         }
         QProgressBar#LoadingProgress {
             background: @cardBorder;
@@ -4884,8 +4913,8 @@ void MainWindow::ApplyStyle() {
         R"(
         /* 通用按钮 */
         QPushButton {
-            min-height: 28px;
-            padding: 0 14px;
+            min-height: @controlHeight;
+            padding: 0 @spaceLg;
             border: 1px solid @inputBorder;
             border-radius: @controlRadius;
             background: @cardBg;
@@ -4928,10 +4957,10 @@ void MainWindow::ApplyStyle() {
 
         /* 输入框与下拉框 */
         QLineEdit, QComboBox {
-            min-height: 28px;
+            min-height: @controlHeight;
             border: 1px solid @inputBorder;
             border-radius: @controlRadius;
-            padding: 0 8px;
+            padding: 0 @spaceSm;
             background: @inputBg;
             color: @textPrimary;
             selection-background-color: @selectedRow;
@@ -4964,7 +4993,7 @@ void MainWindow::ApplyStyle() {
             selection-background-color: @accentSoft;
             selection-color: @accent;
             outline: 0;
-            padding: 4px;
+            padding: @spaceXs;
         }
         QCheckBox {
             color: @textSecondary;
@@ -5054,7 +5083,7 @@ void MainWindow::ApplyStyle() {
         }
         QTreeWidget#CleanupTree::item {
             min-height: 30px;
-            padding: 4px 8px;
+            padding: @spaceXs @spaceSm;
         }
         QTreeWidget#CleanupTree::item:hover {
             background: @hoverRow;
@@ -5070,7 +5099,7 @@ void MainWindow::ApplyStyle() {
         }
         QLabel#CleanupSelected {
             color: @danger;
-            font-size: 12pt;
+            font-size: @fsTitle;
             font-weight: 700;
         }
         QTreeView::branch {
@@ -5099,11 +5128,11 @@ void MainWindow::ApplyStyle() {
         /* 指标卡 */
         QLabel#MetricTitle {
             color: @textMuted;
-            font-size: 8.5pt;
+            font-size: @fsCaption;
         }
         QLabel#MetricValue {
             color: @textPrimary;
-            font-size: 13pt;
+            font-size: @fsTitle;
             font-weight: 700;
         }
 
@@ -5119,13 +5148,13 @@ void MainWindow::ApplyStyle() {
         QLabel#EmptyStateIcon { background: transparent; }
         QLabel#EmptyStateTitle {
             color: @textSecondary;
-            font-size: 12pt;
+            font-size: @fsTitle;
             font-weight: 600;
             background: transparent;
         }
         QLabel#EmptyStateHint {
             color: @textMuted;
-            font-size: 9.5pt;
+            font-size: @fsBody;
             background: transparent;
         }
 
@@ -5138,7 +5167,7 @@ void MainWindow::ApplyStyle() {
             background: transparent;
         }
         QTabBar::tab {
-            padding: 8px 20px;
+            padding: @spaceSm @spaceXl;
             background: transparent;
             border: 1px solid transparent;
             border-bottom: 3px solid transparent;
@@ -5163,12 +5192,12 @@ void MainWindow::ApplyStyle() {
 
         QLabel#AboutTitle {
             color: @textPrimary;
-            font-size: 13pt;
+            font-size: @fsTitle;
             font-weight: 700;
         }
         QLabel#AboutVersion {
             color: @textMuted;
-            font-size: 9pt;
+            font-size: @fsCaption;
         }
         QFrame#AboutSeparator {
             color: @cardBorder;
@@ -5181,14 +5210,14 @@ void MainWindow::ApplyStyle() {
         /* 指标卡焦点强调：总占用用强调色突出层次 */
         QLabel#MetricValueAccent {
             color: @accent;
-            font-size: 15pt;
+            font-size: @fsH1;
             font-weight: 800;
         }
 
         /* 左侧导航品牌页脚 */
         QLabel#ModuleNavFooter {
             color: @textMuted;
-            font-size: 8pt;
+            font-size: @fsCaption;
             padding: 6px 4px 2px 4px;
         }
 
@@ -5260,7 +5289,7 @@ void MainWindow::ApplyStyle() {
         QGroupBox::title {
             subcontrol-origin: margin;
             left: 10px;
-            padding: 0 4px;
+            padding: 0 @spaceXs;
         }
     )");
 
@@ -5299,7 +5328,25 @@ void MainWindow::ApplyStyle() {
         .replace(QStringLiteral("@controlRadius"), QString::number(t.controlRadius))
         .replace(QStringLiteral("@cardRadius"), QString::number(t.cardRadius))
         .replace(QStringLiteral("@pillRadius"), QString::number(t.pillRadius))
-        .replace(QStringLiteral("@rowHeight"), QString::number(t.rowHeight));
+        .replace(QStringLiteral("@rowHeight"), QString::number(t.rowHeight))
+        // 度量/字号/尺寸令牌(按长度降序,避免前缀污染)。
+        .replace(QStringLiteral("@primaryButtonMinW"), QString::number(t.primaryButtonMinW))
+        .replace(QStringLiteral("@primaryButtonHeight"), QString::number(t.primaryButtonHeight))
+        .replace(QStringLiteral("@navButtonHeight"), QString::number(t.navButtonHeight))
+        .replace(QStringLiteral("@controlHeight"), QString::number(t.controlHeight))
+        .replace(QStringLiteral("@space2xl"), QString::number(t.space2xl))
+        .replace(QStringLiteral("@spaceDialog"), QString::number(t.spaceDialog))
+        .replace(QStringLiteral("@spaceXl"), QString::number(t.spaceXl))
+        .replace(QStringLiteral("@spaceMd"), QString::number(t.spaceMd))
+        .replace(QStringLiteral("@spaceSm"), QString::number(t.spaceSm))
+        .replace(QStringLiteral("@spaceLg"), QString::number(t.spaceLg))
+        .replace(QStringLiteral("@spaceXs"), QString::number(t.spaceXs))
+        .replace(QStringLiteral("@fsDisplay"), QString::number(t.fsDisplay) + QStringLiteral("pt"))
+        .replace(QStringLiteral("@fsCaption"), QString::number(t.fsCaption) + QStringLiteral("pt"))
+        .replace(QStringLiteral("@fsLabel"), QString::number(t.fsLabel) + QStringLiteral("pt"))
+        .replace(QStringLiteral("@fsTitle"), QString::number(t.fsTitle) + QStringLiteral("pt"))
+        .replace(QStringLiteral("@fsBody"), QString::number(t.fsBody) + QStringLiteral("pt"))
+        .replace(QStringLiteral("@fsH1"), QString::number(t.fsH1) + QStringLiteral("pt"));
 
     setStyleSheet(style);
 
@@ -6746,9 +6793,9 @@ QWidget* MainWindow::CreateHealthTab() {
 
     healthRefreshButton_ = new QPushButton(QStringLiteral("读取健康信息"), hero);
     healthRefreshButton_->setObjectName(QStringLiteral("PrimaryButton"));
-    healthRefreshButton_->setMinimumHeight(40);
+    healthRefreshButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
     healthCancelButton_ = new QPushButton(QStringLiteral("取消"), hero);
-    healthCancelButton_->setMinimumHeight(40);
+    healthCancelButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
     healthCancelButton_->hide();
 
     auto* titleBlock = new QVBoxLayout();
@@ -7149,11 +7196,11 @@ QWidget* MainWindow::CreateDuplicateTab() {
 
     duplicateDeepScanButton_ = new QPushButton(QStringLiteral("内容深度校验"), hero);
     duplicateDeepScanButton_->setObjectName(QStringLiteral("PrimaryButton"));
-    duplicateDeepScanButton_->setMinimumHeight(40);
+    duplicateDeepScanButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
     duplicateQuickButton_ = new QPushButton(QStringLiteral("快速(同名同大小)"), hero);
-    duplicateQuickButton_->setMinimumHeight(40);
+    duplicateQuickButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
     duplicateCancelButton_ = new QPushButton(QStringLiteral("取消校验"), hero);
-    duplicateCancelButton_->setMinimumHeight(40);
+    duplicateCancelButton_->setMinimumHeight(g_activeTokens.primaryButtonHeight);
     duplicateCancelButton_->hide();
 
     auto* titleBlock = new QVBoxLayout();
