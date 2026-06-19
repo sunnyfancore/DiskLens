@@ -104,49 +104,49 @@ void QueryStorageDevice(HANDLE handle, std::wstring& model, std::wstring& serial
 
 /**
  * @brief 读取 NVMe SMART/Health 日志并填充温度/可用备用/寿命/通电。
+ *
+ * 输入须为编译器布局的 STORAGE_PROPERTY_QUERY + STORAGE_PROTOCOL_SPECIFIC_DATA 组合体:后者需 8 字节对齐,
+ * 故不能手动按 sizeof(STORAGE_PROPERTY_QUERY)=12 偏移拼接(会落到偏移 12 而非编译器补齐的 16,驱动读错位直接失败)。
+ * 这里用组合结构体让编译器算正确偏移,缓冲尾部再留 512 字节承载日志(MS stordiag 标准范式)。
  */
 void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
-    STORAGE_PROPERTY_QUERY propertyQuery{};
-    propertyQuery.PropertyId = StorageAdapterProtocolSpecificProperty;
-    propertyQuery.QueryType = PropertyStandardQuery;
+    struct NvmeProtocolQuery {
+        STORAGE_PROPERTY_QUERY propertyQuery;
+        STORAGE_PROTOCOL_SPECIFIC_DATA protocolData;
+    };
 
-    STORAGE_PROTOCOL_SPECIFIC_DATA protocolData{};
-    protocolData.ProtocolType = ProtocolTypeNvme;
-    protocolData.DataType = NVMeDataTypeLogPage;
-    protocolData.ProtocolDataRequestValue = 0x02;        // SMART/Health 日志页。
-    protocolData.ProtocolDataRequestSubValue = 0;
-    protocolData.ProtocolDataRequestSubValue2 = 0;
-    protocolData.ProtocolDataRequestSubValue3 = 0;
-    protocolData.ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
-    protocolData.ProtocolDataLength = 512;
-    protocolData.FixedProtocolReturnData = 0;
-
-    // 同一块缓冲既作输入(查询+协议头)又作输出(描述符+回显协议头+512 字节日志)。
     constexpr std::size_t logBytes = 512;
-    constexpr std::size_t bufferSize = sizeof(STORAGE_PROPERTY_QUERY) + sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + logBytes + 256;
-    std::vector<unsigned char> buffer(bufferSize, 0);
-    std::memcpy(buffer.data(), &propertyQuery, sizeof(propertyQuery));
-    std::memcpy(buffer.data() + sizeof(propertyQuery), &protocolData, sizeof(protocolData));
+    std::vector<unsigned char> buffer(sizeof(NvmeProtocolQuery) + logBytes, 0);
+    auto* query = reinterpret_cast<NvmeProtocolQuery*>(buffer.data());
+    query->propertyQuery.PropertyId = StorageAdapterProtocolSpecificProperty;
+    query->propertyQuery.QueryType = PropertyStandardQuery;
+    query->protocolData.ProtocolType = ProtocolTypeNvme;
+    query->protocolData.DataType = NVMeDataTypeLogPage;
+    query->protocolData.ProtocolDataRequestValue = 0x02;        // SMART/Health 日志页。
+    query->protocolData.ProtocolDataRequestSubValue = 0;        // NSID=0(控制器级日志)。
+    query->protocolData.ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
+    query->protocolData.ProtocolDataLength = static_cast<ULONG>(logBytes);
 
     DWORD returned = 0;
     if (!DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, buffer.data(), static_cast<DWORD>(buffer.size()),
                          buffer.data(), static_cast<DWORD>(buffer.size()), &returned, nullptr)) {
-        info.note = L"NVMe 健康日志读取失败";
+        const DWORD err = GetLastError();
+        info.note = L"NVMe 健康日志读取失败(错误码 " + std::to_wstring(err) + L")";
         return;
     }
 
     // 输出为 STORAGE_PROTOCOL_DATA_DESCRIPTOR:其后是回显的 STORAGE_PROTOCOL_SPECIFIC_DATA,再其后是日志数据。
     if (returned < sizeof(STORAGE_PROTOCOL_DATA_DESCRIPTOR)) {
-        info.note = L"NVMe 健康日志返回数据过短";
+        info.note = L"NVMe 健康日志返回数据过短(returned=" + std::to_wstring(returned) + L")";
         return;
     }
     const auto* descriptor = reinterpret_cast<const STORAGE_PROTOCOL_DATA_DESCRIPTOR*>(buffer.data());
     const STORAGE_PROTOCOL_SPECIFIC_DATA& echo = descriptor->ProtocolSpecificData;
-    const std::uint32_t dataOffset = echo.ProtocolDataOffset;
+    const ULONG dataOffset = echo.ProtocolDataOffset;
     const unsigned char* protocolSpecificStart = reinterpret_cast<const unsigned char*>(&echo);
     const std::size_t base = static_cast<std::size_t>(protocolSpecificStart - buffer.data()) + dataOffset;
-    if (base == 0 || base + logBytes > buffer.size()) {
-        info.note = L"NVMe 健康日志偏移非法";
+    if (dataOffset == 0 || base + logBytes > buffer.size()) {
+        info.note = L"NVMe 健康日志偏移非法(offset=" + std::to_wstring(dataOffset) + L")";
         return;
     }
     const unsigned char* log = buffer.data() + base;
@@ -252,11 +252,12 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
 
     DWORD returned = 0;
     if (!DeviceIoControl(handle, IOCTL_ATA_PASS_THROUGH, &request, sizeof(request), &request, sizeof(request), &returned, nullptr)) {
-        info.note = L"ATA SMART 直读失败(可能为 USB/RAID 虚拟盘,不支持直通)";
+        const DWORD err = GetLastError();
+        info.note = L"ATA SMART 直读失败(错误码 " + std::to_wstring(err) + L";USB/RAID 虚拟盘或部分控制器不支持直通)";
         return;
     }
     if (returned < sizeof(ATA_PASS_THROUGH_EX) + 512) {
-        info.note = L"ATA SMART 返回数据不完整";
+        info.note = L"ATA SMART 返回数据不完整(returned=" + std::to_wstring(returned) + L")";
         return;
     }
 
@@ -403,19 +404,16 @@ std::vector<DiskHealthInfo> DiskHealth::QueryAll() const {
 
         if (isNvme) {
             QueryNvmeHealth(handle, info);
-        } else if (busType == BusTypeSata || busType == BusTypeAta || busType == BusTypeAtapi) {
-            QueryAtaSmart(handle, info);
         } else if (busType == BusTypeUsb) {
             info.note = L"USB 盘不支持 SMART 直读";
             info.status = DiskHealthStatus::Unreadable;
         } else {
-            info.note = model.empty() ? L"未知接口,无法读取健康信息" : L"未知接口,无法读取健康信息";
-            info.status = DiskHealthStatus::Unreadable;
-        }
-
-        // 总线查询本身失败(model/serial 空):尝试按型号兜底走 ATA。
-        if (info.status == DiskHealthStatus::Unreadable && busType == BusTypeUnknown && !model.empty()) {
+            // SATA/ATA/ATAPI,以及 SAS/RAID/虚拟盘等非常规总线,统一尝试 ATA SMART 直读;
+            // 不支持直通的盘会在此逐盘降级为不可读取,不影响其它盘。
             QueryAtaSmart(handle, info);
+            if (info.status == DiskHealthStatus::Unreadable) {
+                info.note += L" · 总线类型 " + std::to_wstring(static_cast<int>(busType));
+            }
         }
 
         if (info.temperatureCelsius < -100) {

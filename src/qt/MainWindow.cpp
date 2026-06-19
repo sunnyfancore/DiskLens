@@ -6909,6 +6909,8 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
         }
         const QString statusText = info.statusText.empty() ? QStringLiteral("不可读取") : ToQString(info.statusText);
         const QColor statusCol = statusColor(info.status);
+        // 备注作为悬浮提示:不可读取时说明具体原因(便于诊断),可读时说明数据来源。
+        const QString noteText = info.note.empty() ? QString() : ToQString(info.note);
 
         auto* diskItem = new QTableWidgetItem(diskText);
         auto* modelItem = new QTableWidgetItem(modelText);
@@ -6918,6 +6920,13 @@ void MainWindow::PopulateHealthTable(const std::vector<disk_lens::core::DiskHeal
         auto* tempItem = new QTableWidgetItem(tempText);
         auto* powerItem = new QTableWidgetItem(powerText);
         auto* statusItem = new QTableWidgetItem(statusText);
+
+        if (!noteText.isEmpty()) {
+            statusItem->setToolTip(noteText);
+            diskItem->setToolTip(diskText + QStringLiteral("\n") + noteText);
+        } else {
+            diskItem->setToolTip(diskText);
+        }
 
         healthItem->setTextAlignment(Qt::AlignCenter);
         tempItem->setTextAlignment(Qt::AlignCenter);
