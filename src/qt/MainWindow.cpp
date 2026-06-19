@@ -4965,6 +4965,33 @@ void MainWindow::ApplyStyle() {
             background: @accentPressed;
             border-color: @accentDeep;
         }
+        QPushButton#PrimaryButton:disabled {
+            background: @accentSoft;
+            border-color: @accentSoftBorder;
+            color: @textMuted;
+        }
+        QPushButton#SecondaryButton {
+            background: @cardBg;
+            border: 1px solid @inputBorder;
+            color: @textSecondary;
+            font-weight: 500;
+        }
+        QPushButton#SecondaryButton:hover {
+            background: @accentSoft;
+            border-color: @accentSoftBorder;
+            color: @accent;
+        }
+        QPushButton#SecondaryButton:pressed {
+            background: @accentSoftBorder;
+            border-color: @accent;
+            padding-top: 1px;
+            padding-left: 15px;
+        }
+        QPushButton#SecondaryButton:disabled {
+            color: @textMuted;
+            background: @cardBg;
+            border-color: @cardBorder;
+        }
         QPushButton:disabled {
             color: @textMuted;
             background: @cardBorder;
@@ -4984,6 +5011,9 @@ void MainWindow::ApplyStyle() {
         }
         QLineEdit:focus, QComboBox:focus {
             border-color: @accent;
+        }
+        QLineEdit:hover {
+            border-color: @accentSoftBorder;
         }
         QComboBox:hover {
             border-color: @accentSoftBorder;
