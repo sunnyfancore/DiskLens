@@ -593,6 +593,15 @@ private:
     void CancelDiskHealth();
 
     /**
+     * @brief 弹出磁盘健康详情对话框,完整展示单块物理盘的全部健康指标与诊断备注。
+     *
+     * 健康表格列宽有限、长文本(序列号、诊断备注)会省略且 tooltip 不可靠;
+     * 此对话框以全宽展开所有字段,并把失败原因备注单独成可换行、可选中复制的段落。
+     * @param row 健康表格中的行号(对应 healthInfos_ 的下标)。
+     */
+    void ShowHealthDetailDialog(int row);
+
+    /**
      * @brief 填充长期未动文件表格（按修改时间最旧排序）。
      */
     void PopulateStaleFilesTable();

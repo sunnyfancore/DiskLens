@@ -6801,10 +6801,152 @@ QWidget* MainWindow::CreateHealthTab() {
     layout->addWidget(hero);
     layout->addWidget(healthTable_, 1);
 
+    // 右键菜单与双击直达详情:表格列宽有限、长文本(序列号、诊断备注)会省略且 tooltip 不可靠,
+    // 故提供独立详情对话框完整展示单块物理盘的全部健康指标。
+    healthTable_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(healthTable_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+        const QModelIndex index = healthTable_->indexAt(position);
+        if (!index.isValid()) {
+            return;
+        }
+        healthTable_->selectionModel()->select(index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        const int row = index.row();
+        QMenu menu(this);
+        menu.addAction(QStringLiteral("查看详情"), this, [this, row]() { ShowHealthDetailDialog(row); });
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("刷新健康信息"), this, [this]() { RefreshDiskHealth(); });
+        menu.exec(healthTable_->viewport()->mapToGlobal(position));
+    });
+    connect(healthTable_, &QTableWidget::doubleClicked, this, [this](const QModelIndex& index) {
+        ShowHealthDetailDialog(index.row());
+    });
+
     connect(healthRefreshButton_, &QPushButton::clicked, this, [this]() { RefreshDiskHealth(); });
     connect(healthCancelButton_, &QPushButton::clicked, this, [this]() { CancelDiskHealth(); });
 
     return page;
+}
+
+void MainWindow::ShowHealthDetailDialog(int row) {
+    if (healthTable_ == nullptr || row < 0 || row >= static_cast<int>(healthInfos_.size())) {
+        return;
+    }
+    const core::DiskHealthInfo& info = healthInfos_[row];
+
+    auto statusColor = [](core::DiskHealthStatus status) -> QColor {
+        switch (status) {
+            case core::DiskHealthStatus::Good: return QColor(QStringLiteral("#3FA34D"));
+            case core::DiskHealthStatus::Attention: return QColor(QStringLiteral("#E8A33D"));
+            case core::DiskHealthStatus::Warning: return QColor(QStringLiteral("#E0473E"));
+            default: return QColor(QStringLiteral("#8A8F98"));
+        }
+    };
+
+    const QString dash = QStringLiteral("-");
+    QString diskText = QStringLiteral("物理盘 %1").arg(info.physicalDriveNumber);
+    if (!info.driveLetters.empty()) {
+        diskText += QStringLiteral(" · ") + ToQString(info.driveLetters);
+    }
+    const QString modelText = info.model.empty() ? QStringLiteral("(未知型号)") : ToQString(info.model);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("磁盘健康详情"));
+    dialog.setWindowIcon(windowIcon());
+    dialog.resize(600, 560);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(20, 18, 20, 16);
+    layout->setSpacing(12);
+
+    auto* titleLabel = new QLabel(diskText + QStringLiteral("  ·  ") + modelText, &dialog);
+    titleLabel->setObjectName(QStringLiteral("AboutTitle"));
+    titleLabel->setWordWrap(true);
+
+    auto* detailTable = new QTableWidget(&dialog);
+    detailTable->setObjectName(QStringLiteral("CleanupTree"));
+    detailTable->setColumnCount(2);
+    detailTable->setHorizontalHeaderLabels({QStringLiteral("项目"), QStringLiteral("内容")});
+    detailTable->verticalHeader()->setVisible(false);
+    detailTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    detailTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    detailTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    detailTable->setSelectionMode(QAbstractItemView::SingleSelection);
+    detailTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    detailTable->setAlternatingRowColors(true);
+    detailTable->setShowGrid(false);
+    detailTable->setTextElideMode(Qt::ElideRight);
+
+    const auto addRow = [detailTable](const QString& key, const QString& value) {
+        const int r = detailTable->rowCount();
+        detailTable->insertRow(r);
+        auto* keyItem = new QTableWidgetItem(key);
+        auto* valueItem = new QTableWidgetItem(value);
+        valueItem->setToolTip(value);
+        detailTable->setItem(r, 0, keyItem);
+        detailTable->setItem(r, 1, valueItem);
+        return r;
+    };
+
+    addRow(QStringLiteral("磁盘"), diskText);
+    addRow(QStringLiteral("型号"), modelText);
+    addRow(QStringLiteral("序列号"), info.serial.empty() ? dash : ToQString(info.serial));
+    addRow(QStringLiteral("接口"), info.interfaceType.empty() ? dash : ToQString(info.interfaceType));
+    addRow(QStringLiteral("容量"), info.totalBytes > 0 ? ToQString(core::FormatBytes(info.totalBytes)) : dash);
+    addRow(QStringLiteral("健康度"), info.healthPercent >= 0 ? QStringLiteral("%1%").arg(info.healthPercent) : dash);
+    addRow(QStringLiteral("温度"), info.temperatureCelsius >= 0 ? QStringLiteral("%1 °C").arg(info.temperatureCelsius) : dash);
+    QString powerText = dash;
+    if (info.powerOnHours >= 0) {
+        const long long hours = info.powerOnHours;
+        const long long days = hours / 24;
+        const long long remHours = hours % 24;
+        powerText = QStringLiteral("%1 小时").arg(static_cast<qlonglong>(hours));
+        if (days > 0) {
+            powerText += QStringLiteral(" · 约 %1 天 %2 时").arg(static_cast<qlonglong>(days)).arg(static_cast<qlonglong>(remHours));
+        }
+    }
+    addRow(QStringLiteral("通电时长"), powerText);
+    addRow(QStringLiteral("通电次数"), info.powerCycleCount >= 0 ? QString::number(static_cast<qlonglong>(info.powerCycleCount)) : dash);
+    addRow(QStringLiteral("可用备用(NVMe)"), info.availableSparePercent >= 0 ? QStringLiteral("%1%").arg(info.availableSparePercent) : dash);
+    addRow(QStringLiteral("重映射扇区"), info.reallocatedSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.reallocatedSectorCount)) : dash);
+    addRow(QStringLiteral("当前待映射扇区"), info.currentPendingSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.currentPendingSectorCount)) : dash);
+    addRow(QStringLiteral("离线无法校正扇区"), info.uncorrectableSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.uncorrectableSectorCount)) : dash);
+    // 状态行单独着色,便于一眼定位异常。
+    const QString statusText = info.statusText.empty() ? QStringLiteral("不可读取") : ToQString(info.statusText);
+    {
+        const int r = addRow(QStringLiteral("状态"), statusText);
+        if (auto* v = detailTable->item(r, 1)) {
+            v->setForeground(statusColor(info.status));
+        }
+    }
+    detailTable->resizeRowsToContents();
+
+    layout->addWidget(titleLabel);
+    layout->addWidget(detailTable, 1);
+
+    // 失败原因 / 数据来源备注单独成段:可换行、可选中复制,直接解决表格列省略、tooltip 不可靠的痛点。
+    const QString noteText = info.note.empty() ? QString() : ToQString(info.note);
+    if (!noteText.isEmpty()) {
+        auto* noteCaption = new QLabel(QStringLiteral("备注(数据来源 / 失败原因)"), &dialog);
+        auto* noteLabel = new QLabel(noteText, &dialog);
+        noteLabel->setWordWrap(true);
+        noteLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        noteLabel->setToolTip(noteText);
+        // 不可读取时高亮诊断信息,正常时跟随主题默认色。
+        if (info.status == core::DiskHealthStatus::Unreadable) {
+            noteLabel->setStyleSheet(QStringLiteral("color: %1;").arg(statusColor(info.status).name()));
+        }
+        layout->addWidget(noteCaption);
+        layout->addWidget(noteLabel);
+    }
+
+    auto* buttons = new QDialogButtonBox(&dialog);
+    QPushButton* closeButton = buttons->addButton(QStringLiteral("关闭"), QDialogButtonBox::AcceptRole);
+    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+
+    ApplyNativeWindowIcon(&dialog);
+    QTimer::singleShot(0, &dialog, [&dialog]() { ApplyNativeWindowIcon(&dialog); });
+    dialog.exec();
 }
 
 void MainWindow::RefreshDiskHealth() {
