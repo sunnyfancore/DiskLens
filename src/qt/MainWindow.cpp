@@ -1863,7 +1863,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     largeFilesView_->setContextMenuPolicy(Qt::CustomContextMenu);
     staleFilesView_->setContextMenuPolicy(Qt::CustomContextMenu);
     typeStatsTable_->setContextMenuPolicy(Qt::CustomContextMenu);
-    duplicateTable_->setContextMenuPolicy(Qt::CustomContextMenu);
+    duplicateTree_->setContextMenuPolicy(Qt::CustomContextMenu);
     searchView_->setContextMenuPolicy(Qt::CustomContextMenu);
     cleanupTree_->setContextMenuPolicy(Qt::CustomContextMenu);
 
@@ -1914,8 +1914,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(staleFilesView_, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
         OpenSelectedPath();
     });
-    connect(duplicateTable_, &QTableWidget::cellDoubleClicked, this, [this](int, int) {
-        OpenSelectedPath();
+    connect(duplicateTree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
+        if (item == nullptr || item->childCount() > 0) {
+            return;  // 组节点不响应双击,仅成员行在资源管理器中定位。
+        }
+        const QString path = item->data(0, Qt::UserRole + 1).toString();
+        if (!path.isEmpty()) {
+            RevealPathInExplorer(path);
+        }
     });
     connect(searchView_, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
         OpenSelectedPath();
@@ -2073,8 +2079,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     connect(typeStatsTable_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
         ShowTypeStatsContextMenu(position);
     });
-    connect(duplicateTable_, &QTableWidget::customContextMenuRequested, this, [this](const QPoint& position) {
-        ShowTableContextMenu(duplicateTable_, position);
+    connect(duplicateTree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& position) {
+        ShowDuplicateContextMenu(position);
     });
     connect(searchView_, &QTableView::customContextMenuRequested, this, [this](const QPoint& position) {
         const QModelIndex index = searchView_->indexAt(position);
@@ -3231,7 +3237,7 @@ void MainWindow::RunAfterClickFeedback(const QString& stateText, const QString& 
             || currentPage == largeFilesView_
             || currentPage == staleFilesView_
             || currentPage == typeStatsTable_
-            || currentPage == duplicateTable_;
+            || currentPage == duplicatePage_;
         if (onDiskAnalysisPage) {
             SetInfoBar(
                 stateText,
@@ -3559,8 +3565,8 @@ QWidget* MainWindow::CreateApplicationMenu() {
     });
     typeStatsTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+3")));
     QAction* duplicateTabAction = viewMenu->addAction(QStringLiteral("疑似重复"), this, [this]() {
-        if (tabs_ != nullptr && duplicateTable_ != nullptr) {
-            tabs_->setCurrentWidget(duplicateTable_);
+        if (tabs_ != nullptr && duplicatePage_ != nullptr) {
+            tabs_->setCurrentWidget(duplicatePage_);
         }
     });
     duplicateTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+4")));
@@ -3954,7 +3960,6 @@ QWidget* MainWindow::CreateWorkspace() {
     largeFilesTable_ = CreateResultTable();
     largeFilesTable_->hide();
     typeStatsTable_ = CreateResultTable();
-    duplicateTable_ = CreateResultTable();
     staleFilesModel_ = new ResultTableModel(this);
     staleFilesView_ = new QTableView(rightPanel);
     staleFilesView_->setModel(staleFilesModel_);
@@ -3983,7 +3988,7 @@ QWidget* MainWindow::CreateWorkspace() {
     tabs_->addTab(directoryView_, QStringLiteral("目录内容"));
     tabs_->addTab(largeFilesView_, QStringLiteral("大文件"));
     tabs_->addTab(typeStatsTable_, QStringLiteral("类型统计"));
-    tabs_->addTab(duplicateTable_, QStringLiteral("疑似重复"));
+    tabs_->addTab(CreateDuplicateTab(), QStringLiteral("疑似重复"));
     tabs_->addTab(staleFilesView_, QStringLiteral("长期未动"));
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
     tabs_->addTab(CreateCleanupTab(), QStringLiteral("垃圾清理"));
@@ -4559,7 +4564,7 @@ void MainWindow::UpdateModuleChrome() {
         currentPage == largeFilesView_ ||
         currentPage == staleFilesView_ ||
         currentPage == typeStatsTable_ ||
-        currentPage == duplicateTable_;
+        currentPage == duplicatePage_;
 
     if (directoryTree_ != nullptr) {
         directoryTree_->setVisible(isDiskAnalysisPage);
@@ -5517,7 +5522,11 @@ void MainWindow::StartScan() {
         largeFilesModel_->Clear();
     }
     typeStatsTable_->setRowCount(0);
-    duplicateTable_->setRowCount(0);
+    CancelDuplicateContentScan();
+    if (duplicateTree_ != nullptr) {
+        duplicateTree_->clear();
+    }
+    duplicateGroups_.clear();
     if (directoryModel_ != nullptr) {
         directoryModel_->SetRows(QVector<ResultRow>{
             ResultRow{
@@ -5551,7 +5560,9 @@ void MainWindow::StartScan() {
         });
     }
     ShowLoadingRow(typeStatsTable_, QStringLiteral("等待扫描完成"), QStringLiteral("扫描完成后生成类型统计"));
-    ShowLoadingRow(duplicateTable_, QStringLiteral("等待扫描完成"), QStringLiteral("扫描完成后分析疑似重复文件"));
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("等待扫描完成 · 扫描后将分析疑似重复文件"));
+    }
     if (searchModel_ != nullptr) {
         searchModel_->SetRows(QVector<ResultRow>{
             ResultRow{
@@ -5778,7 +5789,7 @@ void MainWindow::PopulateScanResult() {
 void MainWindow::ResetDeferredTableStates() {
     largeFilesTableLoaded_ = false;
     typeStatsTableLoaded_ = false;
-    duplicateTableLoaded_ = false;
+    duplicateTreeLoaded_ = false;
     staleFilesTableLoaded_ = false;
 
     if (largeFilesModel_ != nullptr) {
@@ -5814,7 +5825,9 @@ void MainWindow::ResetDeferredTableStates() {
         });
     }
     ShowLoadingRow(typeStatsTable_, QStringLiteral("切换到此页时加载"), QStringLiteral("类型统计会按需生成"));
-    ShowLoadingRow(duplicateTable_, QStringLiteral("切换到此页时加载"), QStringLiteral("重复候选分析会按需生成"));
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("切换到此页时加载 · 重复候选分析会按需生成"));
+    }
 }
 
 void MainWindow::PopulateCurrentDeferredTab() {
@@ -5833,9 +5846,9 @@ void MainWindow::PopulateCurrentDeferredTab() {
         PopulateTypeStatsTable();
         return;
     }
-    if (current == duplicateTable_ && !duplicateTableLoaded_) {
-        duplicateTableLoaded_ = true;
-        PopulateDuplicateTable();
+    if (current == duplicatePage_ && !duplicateTreeLoaded_) {
+        duplicateTreeLoaded_ = true;
+        PopulateDuplicateTree();
         return;
     }
     if (current == staleFilesView_ && !staleFilesTableLoaded_) {
@@ -6226,12 +6239,17 @@ void MainWindow::PopulateTypeStatsTable() {
     EndTableUpdate(typeStatsTable_);
 }
 
-void MainWindow::PopulateDuplicateTable() {
-    if (!latestResult_ || !latestResult_->root) {
+void MainWindow::PopulateDuplicateTree() {
+    if (!latestResult_ || !latestResult_->root || duplicateTree_ == nullptr) {
         return;
     }
 
-    ShowLoadingRow(duplicateTable_, QStringLiteral("正在分析疑似重复"), QStringLiteral("后台分组，不阻塞界面操作"));
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("正在按同名同大小分组……"));
+    }
+    duplicateTree_->clear();
+    duplicateGroups_.clear();
+
     const std::shared_ptr<core::ScanResult> snapshot = latestResult_;
     const core::ScanNode* root = snapshot->root.get();
     std::thread([this, snapshot, root]() {
@@ -6246,45 +6264,551 @@ void MainWindow::PopulateDuplicateTable() {
             groups[file->name + L"|" + std::to_wstring(file->totalBytes)].push_back(file);
         }
 
-        auto rows = std::make_shared<std::vector<SearchRecord>>();
-        rows->reserve(5000);
-        for (const auto& group : groups) {
-            if (group.second.size() < 2) {
+        std::vector<DuplicateGroupUi> built;
+        for (auto& [key, members] : groups) {
+            (void)key;
+            if (members.size() < 2) {
                 continue;
             }
-
-            for (const core::ScanNode* file : group.second) {
-                const QString name = ToQString(file->name);
-                const QString path = ToQString(file->path);
-                rows->push_back(SearchRecord{
-                    name,
-                    ToQString(core::FormatBytes(file->totalBytes)),
-                    QStringLiteral("重复候选 %1 项").arg(static_cast<qulonglong>(group.second.size())),
-                    path,
-                    MakeSearchKey(name, path),
-                    file->totalBytes,
-                });
-                if (rows->size() >= 5000) {
-                    break;
-                }
+            DuplicateGroupUi group;
+            group.bytes = members.front()->totalBytes;
+            group.contentConfirmed = false;
+            for (const core::ScanNode* node : members) {
+                const QString path = ToQString(node->path);
+                DuplicateMemberUi member;
+                member.path = path;
+                member.bytes = node->totalBytes;
+                member.name = ToQString(node->name);
+                const QFileInfo info(path);
+                member.modifiedText = info.exists()
+                    ? FormatModifiedDate(QDateTime(info.lastModified()).toMSecsSinceEpoch())
+                    : QStringLiteral("—");
+                group.members.push_back(std::move(member));
             }
-            if (rows->size() >= 5000) {
-                break;
+            std::sort(group.members.begin(), group.members.end(),
+                      [](const DuplicateMemberUi& left, const DuplicateMemberUi& right) { return left.path < right.path; });
+            built.push_back(std::move(group));
+        }
+        std::sort(built.begin(), built.end(),
+                  [](const DuplicateGroupUi& left, const DuplicateGroupUi& right) { return left.bytes > right.bytes; });
+
+        QMetaObject::invokeMethod(this, [this, snapshot, built = std::move(built)]() mutable {
+            if (latestResult_ != snapshot) {
+                return;
+            }
+            duplicateGroups_ = std::move(built);
+            RebuildDuplicateTreeFromModel();
+            if (duplicateStatusLabel_ != nullptr) {
+                duplicateStatusLabel_->setText(QStringLiteral("快速视图(同名同大小):%1 组候选。是否真正重复请点「内容深度校验」用 SHA-256 确认。")
+                    .arg(static_cast<qulonglong>(duplicateGroups_.size())));
+            }
+        }, Qt::QueuedConnection);
+    }).detach();
+}
+
+void MainWindow::StartDuplicateContentScan() {
+    if (duplicateHashing_.load() || duplicateTree_ == nullptr || !latestResult_ || !latestResult_->root) {
+        return;
+    }
+
+    duplicateHashCancel_.store(false);
+    duplicateHashing_.store(true);
+    if (duplicateDeepScanButton_ != nullptr) {
+        duplicateDeepScanButton_->setEnabled(false);
+    }
+    if (duplicateQuickButton_ != nullptr) {
+        duplicateQuickButton_->setEnabled(false);
+    }
+    if (duplicateCancelButton_ != nullptr) {
+        duplicateCancelButton_->show();
+    }
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("正在校验文件内容(SHA-256),大文件需要更多时间……"));
+    }
+
+    const std::shared_ptr<core::ScanResult> snapshot = latestResult_;
+    const core::ScanNode* root = snapshot->root.get();
+    std::thread([this, snapshot, root]() {
+        std::vector<const core::ScanNode*> files;
+        CollectFiles(*root, files);
+        std::vector<std::pair<std::wstring, std::uint64_t>> inputs;
+        inputs.reserve(files.size());
+        for (const core::ScanNode* node : files) {
+            if (node != nullptr && node->totalBytes > 0) {
+                inputs.emplace_back(node->path, node->totalBytes);
             }
         }
 
-        QMetaObject::invokeMethod(this, [this, snapshot, root, rows]() {
-            if (latestResult_ != snapshot || !latestResult_ || latestResult_->root.get() != root) {
+        const core::FileHasher hasher;
+        std::vector<core::DuplicateGroup> groups = hasher.FindContentDuplicates(
+            inputs,
+            [this](const core::DuplicateHashProgress& progress) {
+                QMetaObject::invokeMethod(this, [this, progress]() {
+                    if (duplicateStatusLabel_ != nullptr && duplicateHashing_.load()) {
+                        duplicateStatusLabel_->setText(
+                            QStringLiteral("正在校验内容:已处理 %1 / %2 个文件 · 已读 %3 / %4")
+                                .arg(static_cast<qulonglong>(progress.filesHashed))
+                                .arg(static_cast<qulonglong>(progress.hashCandidates))
+                                .arg(ToQString(core::FormatBytes(progress.bytesHashed)))
+                                .arg(ToQString(core::FormatBytes(progress.bytesTotal))));
+                    }
+                }, Qt::QueuedConnection);
+            },
+            [this]() { return duplicateHashCancel_.load(); });
+
+        QMetaObject::invokeMethod(this, [this, snapshot, groups = std::move(groups)]() mutable {
+            if (latestResult_ != snapshot) {
+                // 扫描已更新:丢弃结果,但仍复位校验态。
+                duplicateHashing_.store(false);
+                duplicateHashCancel_.store(false);
+                if (duplicateDeepScanButton_ != nullptr) duplicateDeepScanButton_->setEnabled(true);
+                if (duplicateQuickButton_ != nullptr) duplicateQuickButton_->setEnabled(true);
+                if (duplicateCancelButton_ != nullptr) duplicateCancelButton_->hide();
                 return;
             }
-            BeginTableUpdate(duplicateTable_);
-            duplicateTable_->setRowCount(0);
-            for (const SearchRecord& row : *rows) {
-                AddTableRow(duplicateTable_, row.name, row.size, row.type, row.path);
-            }
-            EndTableUpdate(duplicateTable_);
+            PopulateDuplicateTreeFromContent(groups);
         }, Qt::QueuedConnection);
     }).detach();
+}
+
+void MainWindow::CancelDuplicateContentScan() {
+    if (!duplicateHashing_.load()) {
+        return;
+    }
+    duplicateHashCancel_.store(true);
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("正在取消内容校验……"));
+    }
+}
+
+void MainWindow::PopulateDuplicateTreeFromContent(const std::vector<core::DuplicateGroup>& groups) {
+    const bool wasCancelled = duplicateHashCancel_.load();
+    duplicateHashing_.store(false);
+    duplicateHashCancel_.store(false);
+    if (duplicateDeepScanButton_ != nullptr) {
+        duplicateDeepScanButton_->setEnabled(true);
+    }
+    if (duplicateQuickButton_ != nullptr) {
+        duplicateQuickButton_->setEnabled(true);
+    }
+    if (duplicateCancelButton_ != nullptr) {
+        duplicateCancelButton_->hide();
+    }
+
+    duplicateGroups_.clear();
+    duplicateGroups_.reserve(groups.size());
+    std::uint64_t reclaimable = 0;
+    for (const core::DuplicateGroup& group : groups) {
+        DuplicateGroupUi ui;
+        ui.bytes = group.bytes;
+        ui.contentConfirmed = true;
+        for (const core::DuplicateMember& member : group.members) {
+            const QString path = ToQString(member.path);
+            DuplicateMemberUi m;
+            m.path = path;
+            m.bytes = member.bytes;
+            const QFileInfo info(path);
+            m.name = info.fileName().isEmpty() ? path : info.fileName();
+            m.modifiedText = info.exists()
+                ? FormatModifiedDate(QDateTime(info.lastModified()).toMSecsSinceEpoch())
+                : QStringLiteral("—");
+            ui.members.push_back(std::move(m));
+        }
+        if (ui.members.size() >= 2) {
+            reclaimable += ui.bytes * static_cast<std::uint64_t>(ui.members.size() - 1);
+            duplicateGroups_.push_back(std::move(ui));
+        }
+    }
+
+    RebuildDuplicateTreeFromModel();
+
+    if (duplicateStatusLabel_ != nullptr) {
+        if (wasCancelled) {
+            duplicateStatusLabel_->setText(QStringLiteral("已取消内容校验:显示 %1 组已确认的重复(部分结果)。")
+                .arg(static_cast<qulonglong>(duplicateGroups_.size())));
+        } else {
+            duplicateStatusLabel_->setText(QStringLiteral("内容深度校验完成:%1 组内容完全相同 · 可回收约 %2(已用 SHA-256 逐字节确认)。")
+                .arg(static_cast<qulonglong>(duplicateGroups_.size()))
+                .arg(ToQString(core::FormatBytes(reclaimable))));
+        }
+    }
+}
+
+void MainWindow::RebuildDuplicateTreeFromModel() {
+    if (duplicateTree_ == nullptr) {
+        return;
+    }
+    duplicateTree_->blockSignals(true);
+    duplicateTree_->clear();
+
+    for (const DuplicateGroupUi& group : duplicateGroups_) {
+        if (group.members.size() < 2) {
+            continue;
+        }
+        const std::uint64_t reclaimable = group.bytes * static_cast<std::uint64_t>(group.members.size() - 1);
+        auto* groupItem = new QTreeWidgetItem(duplicateTree_);
+        const QString headLabel = group.contentConfirmed
+            ? QStringLiteral("内容相同 · %1 项 · 哈希确认").arg(static_cast<qulonglong>(group.members.size()))
+            : QStringLiteral("同名同大小 · %1 项").arg(static_cast<qulonglong>(group.members.size()));
+        groupItem->setText(0, headLabel);
+        groupItem->setText(1, ToQString(core::FormatBytes(group.bytes)));
+        groupItem->setText(2, group.contentConfirmed ? QStringLiteral("可回收 ") + ToQString(core::FormatBytes(reclaimable)) : QStringLiteral("待确认"));
+        groupItem->setText(3, QString());
+        groupItem->setCheckState(0, Qt::Unchecked);
+        QFont groupFont = groupItem->font(0);
+        groupFont.setBold(true);
+        groupItem->setFont(0, groupFont);
+
+        for (const DuplicateMemberUi& member : group.members) {
+            auto* child = new QTreeWidgetItem(groupItem);
+            child->setText(0, member.name);
+            child->setText(1, ToQString(core::FormatBytes(member.bytes)));
+            child->setText(2, member.modifiedText);
+            child->setText(3, QDir::toNativeSeparators(member.path));
+            child->setData(0, Qt::UserRole + 1, member.path);
+            child->setData(0, Qt::UserRole + 2, static_cast<qulonglong>(member.bytes));
+            child->setCheckState(0, Qt::Unchecked);
+        }
+    }
+
+    duplicateTree_->blockSignals(false);
+    UpdateDuplicateSelectedSummary();
+}
+
+void MainWindow::UpdateDuplicateSelectedSummary() {
+    if (duplicateTree_ == nullptr || duplicateSelectedLabel_ == nullptr) {
+        return;
+    }
+    std::uint64_t selectedBytes = 0;
+    std::size_t selectedCount = 0;
+    for (int i = 0; i < duplicateTree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* groupItem = duplicateTree_->topLevelItem(i);
+        if (groupItem == nullptr) {
+            continue;
+        }
+        for (int c = 0; c < groupItem->childCount(); ++c) {
+            QTreeWidgetItem* child = groupItem->child(c);
+            if (child != nullptr && child->checkState(0) == Qt::Checked) {
+                selectedBytes += child->data(0, Qt::UserRole + 2).toULongLong();
+                ++selectedCount;
+            }
+        }
+    }
+    duplicateSelectedLabel_->setText(QStringLiteral("已勾选 %1 项 · %2")
+        .arg(static_cast<qulonglong>(selectedCount))
+        .arg(ToQString(core::FormatBytes(selectedBytes))));
+    if (duplicateDeleteButton_ != nullptr) {
+        duplicateDeleteButton_->setEnabled(selectedCount > 0);
+    }
+}
+
+void MainWindow::SetDuplicateCheckedMode(const QString& mode) {
+    if (duplicateTree_ == nullptr) {
+        return;
+    }
+    duplicateTree_->blockSignals(true);
+    for (int i = 0; i < duplicateTree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* groupItem = duplicateTree_->topLevelItem(i);
+        if (groupItem == nullptr) {
+            continue;
+        }
+        if (mode == QStringLiteral("none")) {
+            for (int c = 0; c < groupItem->childCount(); ++c) {
+                if (groupItem->child(c) != nullptr) {
+                    groupItem->child(c)->setCheckState(0, Qt::Unchecked);
+                }
+            }
+            groupItem->setCheckState(0, Qt::Unchecked);
+        } else {
+            // all / keepFirst:勾选除首项外的全部子项(每组至少保留 1 个副本)。
+            for (int c = 0; c < groupItem->childCount(); ++c) {
+                if (groupItem->child(c) != nullptr) {
+                    groupItem->child(c)->setCheckState(0, c == 0 ? Qt::Unchecked : Qt::Checked);
+                }
+            }
+            groupItem->setCheckState(0, Qt::Checked);
+        }
+    }
+    duplicateTree_->blockSignals(false);
+    UpdateDuplicateSelectedSummary();
+}
+
+void MainWindow::ShowDuplicateContextMenu(const QPoint& position) {
+    if (duplicateTree_ == nullptr) {
+        return;
+    }
+    QTreeWidgetItem* item = duplicateTree_->itemAt(position);
+    QMenu menu(this);
+    if (item != nullptr && item->childCount() > 0) {
+        menu.addAction(QStringLiteral("展开/折叠"), this, [item]() {
+            if (item != nullptr) {
+                item->setExpanded(!item->isExpanded());
+            }
+        });
+        menu.addSeparator();
+        menu.addAction(QStringLiteral("导出当前列表"), this, &MainWindow::ExportCurrentTable);
+        menu.exec(duplicateTree_->viewport()->mapToGlobal(position));
+        return;
+    }
+    if (item != nullptr) {
+        duplicateTree_->setCurrentItem(item);
+    }
+    const QString path = item != nullptr ? item->data(0, Qt::UserRole + 1).toString() : QString();
+    const std::uint64_t bytes = item != nullptr ? item->data(0, Qt::UserRole + 2).toULongLong() : 0;
+    AddPathActions(menu, path, true, bytes, true);
+    menu.addSeparator();
+    QAction* toggleAction = menu.addAction(QStringLiteral("勾选/取消勾选"), this, [item]() {
+        if (item != nullptr) {
+            item->setCheckState(0, item->checkState(0) == Qt::Checked ? Qt::Unchecked : Qt::Checked);
+        }
+    });
+    toggleAction->setEnabled(item != nullptr);
+    menu.addSeparator();
+    menu.addAction(QStringLiteral("导出当前列表"), this, &MainWindow::ExportCurrentTable);
+    menu.exec(duplicateTree_->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::DeleteSelectedDuplicateItems() {
+    if (duplicateTree_ == nullptr) {
+        return;
+    }
+
+    // 收集每个组里勾选的子项路径;每组至少保留 1 个副本(首项),避免删光所有副本。
+    struct PendingDelete {
+        QString path;
+        std::uint64_t bytes = 0;
+    };
+    std::vector<PendingDelete> pending;
+    QStringList protectedList;
+    QStringList missingList;
+    for (int i = 0; i < duplicateTree_->topLevelItemCount(); ++i) {
+        QTreeWidgetItem* groupItem = duplicateTree_->topLevelItem(i);
+        if (groupItem == nullptr) {
+            continue;
+        }
+        std::vector<int> checkedChildren;
+        for (int c = 0; c < groupItem->childCount(); ++c) {
+            QTreeWidgetItem* child = groupItem->child(c);
+            if (child != nullptr && child->checkState(0) == Qt::Checked) {
+                checkedChildren.push_back(c);
+            }
+        }
+        if (checkedChildren.empty()) {
+            continue;
+        }
+        // 若整组都被勾选,保留首项。
+        if (static_cast<int>(checkedChildren.size()) >= groupItem->childCount() && !checkedChildren.empty()) {
+            checkedChildren.erase(checkedChildren.begin());
+        }
+        for (int c : checkedChildren) {
+            QTreeWidgetItem* child = groupItem->child(c);
+            if (child == nullptr) {
+                continue;
+            }
+            const QString path = child->data(0, Qt::UserRole + 1).toString();
+            const std::uint64_t bytes = child->data(0, Qt::UserRole + 2).toULongLong();
+            if (path.isEmpty()) {
+                continue;
+            }
+            if (IsProtectedManualDeletePath(path)) {
+                protectedList << QFileInfo(path).fileName();
+                continue;
+            }
+            if (!QFileInfo::exists(path)) {
+                missingList << QFileInfo(path).fileName();
+                continue;
+            }
+            pending.push_back(PendingDelete{path, bytes});
+        }
+    }
+
+    if (pending.empty()) {
+        ShowAppMessageBox(this, QMessageBox::Information, QStringLiteral("重复去重"),
+            QStringLiteral("没有可删除的项目(可能已勾选受保护位置或文件已不存在)。"));
+        return;
+    }
+
+    std::uint64_t pendingBytes = 0;
+    for (const PendingDelete& item : pending) {
+        pendingBytes += item.bytes;
+    }
+    const bool permanentDelete = duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked();
+    const QString modeText = permanentDelete
+        ? QStringLiteral("永久删除:不会进入回收站,无法还原")
+        : QStringLiteral("移入回收站:可从回收站手动还原");
+    const QMessageBox::StandardButton choice = ShowAppMessageBox(
+        this,
+        QMessageBox::Question,
+        permanentDelete ? QStringLiteral("确认永久删除") : QStringLiteral("确认移入回收站"),
+        QStringLiteral("将%1 %2 个重复文件,共 %3。\n%4。\n\n每组会至少保留 1 个副本。是否继续?")
+            .arg(permanentDelete ? QStringLiteral("永久删除") : QStringLiteral("移入回收站"))
+            .arg(static_cast<qulonglong>(pending.size()))
+            .arg(ToQString(core::FormatBytes(pendingBytes)))
+            .arg(modeText),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (choice != QMessageBox::Yes) {
+        return;
+    }
+
+    int cleaned = 0;
+    SetBusyState(true, permanentDelete ? QStringLiteral("永久删除重复文件") : QStringLiteral("移入回收站"));
+    for (const PendingDelete& item : pending) {
+        if (permanentDelete ? PermanentlyDeletePath(item.path) : RecyclePath(item.path)) {
+            ++cleaned;
+        }
+    }
+    SetBusyState(false, QString());
+
+    // 刷新:剔除已不存在的成员,丢掉成员不足 2 的组。
+    for (auto it = duplicateGroups_.begin(); it != duplicateGroups_.end();) {
+        auto& members = it->members;
+        members.erase(std::remove_if(members.begin(), members.end(),
+                          [](const DuplicateMemberUi& member) { return !QFileInfo::exists(member.path); }),
+                      members.end());
+        if (members.size() < 2) {
+            it = duplicateGroups_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    RebuildDuplicateTreeFromModel();
+
+    const QString note = (!protectedList.isEmpty() ? QStringLiteral("  其中 %1 个受保护已跳过").arg(protectedList.size()) : QString());
+    if (duplicateStatusLabel_ != nullptr) {
+        duplicateStatusLabel_->setText(QStringLiteral("已处理 %1 / %2 个重复文件。%3")
+            .arg(cleaned)
+            .arg(static_cast<qulonglong>(pending.size()))
+            .arg(note));
+    }
+}
+
+QWidget* MainWindow::CreateDuplicateTab() {
+    auto* page = new QWidget(this);
+    duplicatePage_ = page;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(8);
+
+    auto* hero = new QFrame(page);
+    hero->setObjectName(QStringLiteral("CleanupHero"));
+    auto* heroLayout = new QVBoxLayout(hero);
+    heroLayout->setContentsMargins(16, 12, 16, 12);
+    heroLayout->setSpacing(8);
+
+    auto* titleLabel = new QLabel(QStringLiteral("重复文件查找与去重"), hero);
+    titleLabel->setObjectName(QStringLiteral("CleanupTitle"));
+    duplicateStatusLabel_ = new QLabel(QStringLiteral("先扫描磁盘,默认按同名同大小列出重复候选;点「内容深度校验」用 SHA-256 逐字节确认真实重复。"), hero);
+    duplicateStatusLabel_->setObjectName(QStringLiteral("CleanupStatus"));
+    duplicateStatusLabel_->setWordWrap(true);
+
+    duplicateDeepScanButton_ = new QPushButton(QStringLiteral("内容深度校验"), hero);
+    duplicateDeepScanButton_->setObjectName(QStringLiteral("PrimaryButton"));
+    duplicateDeepScanButton_->setMinimumHeight(40);
+    duplicateQuickButton_ = new QPushButton(QStringLiteral("快速(同名同大小)"), hero);
+    duplicateQuickButton_->setMinimumHeight(40);
+    duplicateCancelButton_ = new QPushButton(QStringLiteral("取消校验"), hero);
+    duplicateCancelButton_->setMinimumHeight(40);
+    duplicateCancelButton_->hide();
+
+    auto* titleBlock = new QVBoxLayout();
+    titleBlock->setSpacing(2);
+    titleBlock->addWidget(titleLabel);
+    titleBlock->addWidget(duplicateStatusLabel_);
+    auto* headerLayout = new QHBoxLayout();
+    headerLayout->setSpacing(12);
+    headerLayout->addLayout(titleBlock, 1);
+    headerLayout->addWidget(duplicateQuickButton_);
+    headerLayout->addWidget(duplicateDeepScanButton_);
+    headerLayout->addWidget(duplicateCancelButton_);
+    heroLayout->addLayout(headerLayout);
+
+    duplicateTree_ = new ThemedTreeWidget(hero);
+    duplicateTree_->setObjectName(QStringLiteral("CleanupTree"));
+    duplicateTree_->setHeader(new ModernHeaderView(Qt::Horizontal, duplicateTree_));
+    duplicateTree_->setColumnCount(4);
+    duplicateTree_->setHeaderLabels({
+        QStringLiteral("名称"),
+        QStringLiteral("大小"),
+        QStringLiteral("修改时间"),
+        QStringLiteral("路径"),
+    });
+    duplicateTree_->setRootIsDecorated(true);
+    duplicateTree_->setAnimated(true);
+    duplicateTree_->setAlternatingRowColors(true);
+    duplicateTree_->setUniformRowHeights(false);
+    duplicateTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    duplicateTree_->setIndentation(22);
+    duplicateTree_->setIconSize(QSize(16, 16));
+    duplicateTree_->header()->setStretchLastSection(true);
+    duplicateTree_->header()->resizeSection(0, 280);
+    duplicateTree_->header()->resizeSection(1, 100);
+    duplicateTree_->header()->resizeSection(2, 150);
+
+    auto* bottomBar = new QFrame(page);
+    bottomBar->setObjectName(QStringLiteral("CleanupBottomBar"));
+    auto* bottomLayout = new QHBoxLayout(bottomBar);
+    bottomLayout->setContentsMargins(16, 10, 16, 10);
+    bottomLayout->setSpacing(12);
+
+    auto* selectAllButton = new QPushButton(QStringLiteral("全选"), bottomBar);
+    auto* selectNoneButton = new QPushButton(QStringLiteral("全不选"), bottomBar);
+    duplicateKeepFirstButton_ = new QPushButton(QStringLiteral("勾选:每组保留首项"), bottomBar);
+    duplicatePermanentCheckBox_ = new QCheckBox(QStringLiteral("永久删除(不进回收站)"), bottomBar);
+    duplicateSelectedLabel_ = new QLabel(QStringLiteral("已勾选 0 项 · 0 B"), bottomBar);
+    duplicateSelectedLabel_->setObjectName(QStringLiteral("CleanupSelected"));
+    duplicateDeleteButton_ = new QPushButton(QStringLiteral("一键去重"), bottomBar);
+    duplicateDeleteButton_->setObjectName(QStringLiteral("PrimaryButton"));
+    duplicateDeleteButton_->setEnabled(false);
+
+    bottomLayout->addWidget(selectAllButton);
+    bottomLayout->addWidget(selectNoneButton);
+    bottomLayout->addWidget(duplicateKeepFirstButton_);
+    bottomLayout->addStretch(1);
+    bottomLayout->addWidget(duplicatePermanentCheckBox_);
+    bottomLayout->addWidget(duplicateSelectedLabel_);
+    bottomLayout->addWidget(duplicateDeleteButton_);
+
+    layout->addWidget(hero);
+    layout->addWidget(duplicateTree_, 1);
+    layout->addWidget(bottomBar);
+
+    connect(duplicateDeepScanButton_, &QPushButton::clicked, this, [this]() { StartDuplicateContentScan(); });
+    connect(duplicateQuickButton_, &QPushButton::clicked, this, [this]() {
+        CancelDuplicateContentScan();
+        duplicateTreeLoaded_ = true;
+        PopulateDuplicateTree();
+    });
+    connect(duplicateCancelButton_, &QPushButton::clicked, this, [this]() { CancelDuplicateContentScan(); });
+    connect(selectAllButton, &QPushButton::clicked, this, [this]() { SetDuplicateCheckedMode(QStringLiteral("all")); });
+    connect(selectNoneButton, &QPushButton::clicked, this, [this]() { SetDuplicateCheckedMode(QStringLiteral("none")); });
+    connect(duplicateKeepFirstButton_, &QPushButton::clicked, this, [this]() { SetDuplicateCheckedMode(QStringLiteral("keepFirst")); });
+    connect(duplicateDeleteButton_, &QPushButton::clicked, this, [this]() { DeleteSelectedDuplicateItems(); });
+    connect(duplicatePermanentCheckBox_, &QCheckBox::toggled, this, [this](bool checked) {
+        if (duplicateDeleteButton_ != nullptr) {
+            duplicateDeleteButton_->setText(checked ? QStringLiteral("一键去重(永久删除)") : QStringLiteral("一键去重"));
+        }
+    });
+    connect(duplicateTree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
+        if (item == nullptr || column != 0) {
+            return;
+        }
+        // 组勾选:批量切换除首项外的子项(保留每组首项)。
+        if (item->childCount() > 0) {
+            const Qt::CheckState state = item->checkState(0);
+            duplicateTree_->blockSignals(true);
+            for (int c = 0; c < item->childCount(); ++c) {
+                QTreeWidgetItem* child = item->child(c);
+                if (child != nullptr) {
+                    child->setCheckState(0, c == 0 ? Qt::Unchecked : state);
+                }
+            }
+            duplicateTree_->blockSignals(false);
+        }
+        UpdateDuplicateSelectedSummary();
+    });
+
+    return page;
 }
 
 void MainWindow::PopulateSearchTable() {
@@ -7848,7 +8372,8 @@ void MainWindow::ExportCurrentTable() {
     const bool exportingStaleFiles = tabs_ != nullptr && tabs_->currentWidget() == staleFilesView_ && staleFilesModel_ != nullptr;
     const bool exportingSearch = tabs_ != nullptr && tabs_->currentWidget() != nullptr && tabs_->currentWidget()->isAncestorOf(searchView_) && searchModel_ != nullptr;
     const bool exportingCleanup = tabs_ != nullptr && tabs_->currentWidget() != nullptr && cleanupTree_ != nullptr && tabs_->currentWidget()->isAncestorOf(cleanupTree_);
-    if (table == nullptr && !exportingLargeFiles && !exportingStaleFiles && !exportingSearch && !exportingCleanup) {
+    const bool exportingDuplicate = tabs_ != nullptr && tabs_->currentWidget() != nullptr && duplicateTree_ != nullptr && tabs_->currentWidget()->isAncestorOf(duplicateTree_);
+    if (table == nullptr && !exportingLargeFiles && !exportingStaleFiles && !exportingSearch && !exportingCleanup && !exportingDuplicate) {
         return;
     }
 
@@ -7915,6 +8440,21 @@ void MainWindow::ExportCurrentTable() {
                     << ToQString(core::FormatBytes(bytes))
                     << group.name
                     << nativePath);
+            }
+        }
+    } else if (exportingDuplicate) {
+        headers = QStringList{QStringLiteral("名称"), QStringLiteral("大小"), QStringLiteral("修改时间"), QStringLiteral("路径")};
+        for (const DuplicateGroupUi& group : duplicateGroups_) {
+            const QString headLabel = group.contentConfirmed
+                ? QStringLiteral("【内容相同·哈希确认】%1 项").arg(static_cast<qulonglong>(group.members.size()))
+                : QStringLiteral("【同名同大小】%1 项").arg(static_cast<qulonglong>(group.members.size()));
+            rows << (QStringList() << headLabel << ToQString(core::FormatBytes(group.bytes)) << QString() << QString());
+            for (const DuplicateMemberUi& member : group.members) {
+                rows << (QStringList()
+                    << member.name
+                    << ToQString(core::FormatBytes(member.bytes))
+                    << (member.modifiedText.isEmpty() ? QStringLiteral("—") : member.modifiedText)
+                    << QDir::toNativeSeparators(member.path));
             }
         }
     } else {

@@ -13,6 +13,7 @@ add_executable(DiskLensNative WIN32
     src/app/App.cpp
     src/app/App.rc
     src/core/DirectoryScanner.cpp
+    src/core/FileHasher.cpp
     src/core/Format.cpp
     src/core/LongPath.cpp
     src/core/NtfsMftScanner.cpp
@@ -55,6 +56,7 @@ if (BUILD_QT_UI)
         src/qt/resources.qrc
         src/qt/QtApp.rc
         src/core/DirectoryScanner.cpp
+        src/core/FileHasher.cpp
         src/core/Format.cpp
         src/core/LongPath.cpp
         src/core/NtfsMftScanner.cpp

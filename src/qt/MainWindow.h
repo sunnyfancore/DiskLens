@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/DirectoryScanner.h"
+#include "core/FileHasher.h"
 #include "core/NtfsMftScanner.h"
 #include "core/ScanModels.h"
 #include "qt/ResultTableModel.h"
@@ -521,9 +522,54 @@ private:
     void PopulateTypeStatsTable();
 
     /**
-     * @brief 填充疑似重复表格。
+     * @brief 填充疑似重复树(快速视图:同名同大小分组,不哈希)。
      */
-    void PopulateDuplicateTable();
+    void PopulateDuplicateTree();
+
+    /**
+     * @brief 启动内容深度校验(后台三段式 SHA-256),完成后用内容确认组替换树。
+     */
+    void StartDuplicateContentScan();
+
+    /**
+     * @brief 取消正在进行的重复内容校验。
+     */
+    void CancelDuplicateContentScan();
+
+    /**
+     * @brief 用内容校验结果填充重复树。
+     */
+    void PopulateDuplicateTreeFromContent(const std::vector<core::DuplicateGroup>& groups);
+
+    /**
+     * @brief 把当前重复分组模型重新渲染到树(用于勾选/删除后刷新)。
+     */
+    void RebuildDuplicateTreeFromModel();
+
+    /**
+     * @brief 删除勾选的重复文件(移入回收站或永久删除)。
+     */
+    void DeleteSelectedDuplicateItems();
+
+    /**
+     * @brief 批量设置重复树的勾选模式(all/none/keepFirst)。
+     */
+    void SetDuplicateCheckedMode(const QString& mode);
+
+    /**
+     * @brief 重复树的右键菜单。
+     */
+    void ShowDuplicateContextMenu(const QPoint& position);
+
+    /**
+     * @brief 更新重复树底部"已选中可回收"汇总。
+     */
+    void UpdateDuplicateSelectedSummary();
+
+    /**
+     * @brief 构造重复文件页(头部操作条 + 树 + 底部操作条)。
+     */
+    QWidget* CreateDuplicateTab();
 
     /**
      * @brief 填充长期未动文件表格（按修改时间最旧排序）。
@@ -861,9 +907,53 @@ private:
     QTableWidget* typeStatsTable_ = nullptr;
 
     /**
-     * @brief 疑似重复表格。
+     * @brief 疑似重复树(顶层=去重组,子项=各重复文件,带勾选框)。
      */
-    QTableWidget* duplicateTable_ = nullptr;
+    QTreeWidget* duplicateTree_ = nullptr;
+
+    /**
+     * @brief 疑似重复页(作为标签页直接挂载的容器,setCurrentWidget/页签判定用它)。
+     */
+    QWidget* duplicatePage_ = nullptr;
+    /**
+     * @brief 重复页状态文案(模式 / 进度 / 可回收量)。
+     */
+    QLabel* duplicateStatusLabel_ = nullptr;
+
+    /**
+     * @brief 重复页底部已选中可回收汇总。
+     */
+    QLabel* duplicateSelectedLabel_ = nullptr;
+
+    /**
+     * @brief 内容深度校验按钮(启动后台 SHA-256 去重)。
+     */
+    QPushButton* duplicateDeepScanButton_ = nullptr;
+
+    /**
+     * @brief 快速视图按钮(同名同大小,不哈希)。
+     */
+    QPushButton* duplicateQuickButton_ = nullptr;
+
+    /**
+     * @brief 取消正在进行的重复内容校验。
+     */
+    QPushButton* duplicateCancelButton_ = nullptr;
+
+    /**
+     * @brief 永久删除开关(不进回收站)。
+     */
+    QCheckBox* duplicatePermanentCheckBox_ = nullptr;
+
+    /**
+     * @brief 勾选:每组保留首项,其余待删。
+     */
+    QPushButton* duplicateKeepFirstButton_ = nullptr;
+
+    /**
+     * @brief 一键去重按钮(移入回收站 / 永久删除)。
+     */
+    QPushButton* duplicateDeleteButton_ = nullptr;
 
     /**
      * @brief 长期未动文件虚拟结果表。
@@ -1256,9 +1346,19 @@ private:
     bool typeStatsTableLoaded_ = false;
 
     /**
-     * @brief 疑似重复表格是否已经为当前扫描结果加载。
+     * @brief 疑似重复树是否已经为当前扫描结果加载。
      */
-    bool duplicateTableLoaded_ = false;
+    bool duplicateTreeLoaded_ = false;
+
+    /**
+     * @brief 是否正在后台执行重复内容校验。
+     */
+    std::atomic_bool duplicateHashing_{false};
+
+    /**
+     * @brief 重复内容校验取消标记。
+     */
+    std::atomic_bool duplicateHashCancel_{false};
 
     /**
      * @brief 长期未动文件表格是否已经为当前扫描结果加载。
@@ -1269,6 +1369,56 @@ private:
      * @brief 当前垃圾清理扫描分组。
      */
     std::vector<CleanupGroup> cleanupGroups_;
+
+    /**
+     * @brief 重复文件单个成员(显示信息 + 字节)。
+     */
+    struct DuplicateMemberUi {
+        /**
+         * @brief 显示路径。
+         */
+        QString path;
+
+        /**
+         * @brief 字节数。
+         */
+        std::uint64_t bytes = 0;
+
+        /**
+         * @brief 文件名。
+         */
+        QString name;
+
+        /**
+         * @brief 修改时间文案。
+         */
+        QString modifiedText;
+    };
+
+    /**
+     * @brief 重复文件分组(contentConfirmed=true 经 SHA-256 确认,false 为快速同名同大小)。
+     */
+    struct DuplicateGroupUi {
+        /**
+         * @brief 每个成员字节数(组内一致)。
+         */
+        std::uint64_t bytes = 0;
+
+        /**
+         * @brief 成员列表(至少 2)。
+         */
+        std::vector<DuplicateMemberUi> members;
+
+        /**
+         * @brief 是否经过内容哈希确认。
+         */
+        bool contentConfirmed = false;
+    };
+
+    /**
+     * @brief 当前重复页分组模型(快速视图或内容校验结果)。
+     */
+    std::vector<DuplicateGroupUi> duplicateGroups_;
 
     /**
      * @brief 空间占比图占位说明。
