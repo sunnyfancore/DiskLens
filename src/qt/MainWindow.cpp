@@ -1,6 +1,7 @@
 #include "qt/MainWindow.h"
 
 #include "app/resource.h"
+#include "core/CategoryStats.h"
 #include "core/Format.h"
 #include "core/LongPath.h"
 #include "qt/AppIcons.h"
@@ -3311,7 +3312,7 @@ void MainWindow::RunAfterClickFeedback(const QString& stateText, const QString& 
         const bool onDiskAnalysisPage = currentPage == directoryView_
             || currentPage == largeFilesView_
             || currentPage == staleFilesView_
-            || currentPage == typeStatsTable_
+            || currentPage == typeStatsPage_
             || currentPage == duplicatePage_;
         if (onDiskAnalysisPage) {
             SetInfoBar(
@@ -3637,8 +3638,8 @@ QWidget* MainWindow::CreateApplicationMenu() {
     });
     largeFilesTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+2")));
     QAction* typeStatsTabAction = viewMenu->addAction(QStringLiteral("类型统计"), this, [this]() {
-        if (tabs_ != nullptr && typeStatsTable_ != nullptr) {
-            tabs_->setCurrentWidget(typeStatsTable_);
+        if (tabs_ != nullptr && typeStatsPage_ != nullptr) {
+            tabs_->setCurrentWidget(typeStatsPage_);
         }
     });
     typeStatsTabAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+3")));
@@ -4089,9 +4090,21 @@ QWidget* MainWindow::CreateWorkspace() {
     staleFilesView_->setSortingEnabled(true);
     staleFilesView_->sortByColumn(4, Qt::AscendingOrder);
 
+    // 类型统计页:左侧扩展名表格 + 右侧分类占比环形图(可拖拽分隔)。
+    // 用 QSplitter 包裹后,作为 QTabWidget 的页控件;下方所有“当前页==类型统计”的判断都改用 typeStatsPage_。
+    auto* typeStatsSplitter = new QSplitter(Qt::Horizontal);
+    typeStatsSplitter->setChildrenCollapsible(false);
+    typeStatsSplitter->addWidget(typeStatsTable_);
+    typeStatsDonut_ = new CategoryDonutWidget(typeStatsSplitter);
+    typeStatsSplitter->addWidget(typeStatsDonut_);
+    typeStatsSplitter->setStretchFactor(0, 3);
+    typeStatsSplitter->setStretchFactor(1, 2);
+    typeStatsSplitter->setSizes(QList<int>{480, 320});
+    typeStatsPage_ = typeStatsSplitter;
+
     tabs_->addTab(directoryView_, QStringLiteral("目录内容"));
     tabs_->addTab(largeFilesView_, QStringLiteral("大文件"));
-    tabs_->addTab(typeStatsTable_, QStringLiteral("类型统计"));
+    tabs_->addTab(typeStatsPage_, QStringLiteral("类型统计"));
     tabs_->addTab(CreateDuplicateTab(), QStringLiteral("疑似重复"));
     tabs_->addTab(staleFilesView_, QStringLiteral("长期未动"));
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
@@ -4684,7 +4697,7 @@ void MainWindow::UpdateModuleChrome() {
         currentPage == directoryView_ ||
         currentPage == largeFilesView_ ||
         currentPage == staleFilesView_ ||
-        currentPage == typeStatsTable_ ||
+        currentPage == typeStatsPage_ ||
         currentPage == duplicatePage_;
 
     if (directoryTree_ != nullptr) {
@@ -4768,6 +4781,19 @@ void MainWindow::ApplyStyle() {
         treemapColors.sizeText = QColor(t.textSecondary);
         treemapColors.barTrack = QColor(t.cardBorder);
         treemapWidget_->SetColors(treemapColors);
+    }
+
+    // 同步分类环形图主题颜色(扇区固定彩色,这里只刷新背景/文字/轨道)。
+    if (typeStatsDonut_ != nullptr) {
+        qt_ui::DonutColors donutColors;
+        donutColors.background = QColor(t.cardBg);
+        donutColors.trackBg = QColor(t.cardBorder);
+        donutColors.centerText = QColor(t.textPrimary);
+        donutColors.centerCaption = QColor(t.textSecondary);
+        donutColors.labelText = QColor(t.textPrimary);
+        donutColors.labelValue = QColor(t.textSecondary);
+        donutColors.swatchBorder = QColor(t.cardBorder);
+        typeStatsDonut_->SetColors(donutColors);
     }
 
     // 样式表以 @token 形式占位，末尾用当前主题令牌统一替换，避免散落硬编码颜色。
@@ -5815,6 +5841,9 @@ void MainWindow::StartScan() {
         largeFilesModel_->Clear();
     }
     typeStatsTable_->setRowCount(0);
+    if (typeStatsDonut_ != nullptr) {
+        typeStatsDonut_->Clear(QStringLiteral("正在扫描…"));
+    }
     CancelDuplicateContentScan();
     if (duplicateTree_ != nullptr) {
         duplicateTree_->clear();
@@ -6147,7 +6176,7 @@ void MainWindow::PopulateCurrentDeferredTab() {
         PopulateLargeFilesTable();
         return;
     }
-    if (current == typeStatsTable_ && !typeStatsTableLoaded_) {
+    if (current == typeStatsPage_ && !typeStatsTableLoaded_) {
         typeStatsTableLoaded_ = true;
         PopulateTypeStatsTable();
         return;
@@ -6522,6 +6551,9 @@ void MainWindow::PopulateTypeStatsTable() {
     typeStatsTable_->setRowCount(0);
     if (!latestResult_) {
         EndTableUpdate(typeStatsTable_);
+        if (typeStatsDonut_ != nullptr) {
+            typeStatsDonut_->Clear(QStringLiteral("暂无扫描结果"));
+        }
         return;
     }
 
@@ -6543,6 +6575,12 @@ void MainWindow::PopulateTypeStatsTable() {
             QStringLiteral("按扩展名汇总，不对应单个文件路径"));
     }
     EndTableUpdate(typeStatsTable_);
+
+    // 同步右侧分类环形图:把逐扩展名统计卷成 8 类 + 其他。这是唯一的刷新点——
+    // PopulateTypeStatsTable 已在“切换到类型统计页”与“扫描完成懒加载”两条路径上被调用。
+    if (typeStatsDonut_ != nullptr) {
+        typeStatsDonut_->SetCategories(core::ComputeExtensionCategories(*latestResult_));
+    }
 }
 
 void MainWindow::PopulateDuplicateTree() {

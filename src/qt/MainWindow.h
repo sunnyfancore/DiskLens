@@ -7,6 +7,7 @@
 #include "core/ScanModels.h"
 #include "qt/ResultTableModel.h"
 #include "qt/TreemapWidget.h"
+#include "qt/CategoryDonutWidget.h"
 
 #include <QMainWindow>
 #include <QString>
@@ -970,6 +971,16 @@ private:
      * @brief 类型统计表格。
      */
     QTableWidget* typeStatsTable_ = nullptr;
+
+    /**
+     * @brief 类型统计页(QSplitter:左侧表格 + 右侧分类环形图)。作为 QTabWidget 的页控件。
+     */
+    QWidget* typeStatsPage_ = nullptr;
+
+    /**
+     * @brief 类型统计页右侧的分类占比环形图。
+     */
+    CategoryDonutWidget* typeStatsDonut_ = nullptr;
 
     /**
      * @brief 疑似重复树(顶层=去重组,子项=各重复文件,带勾选框)。

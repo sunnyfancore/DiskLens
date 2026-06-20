@@ -66,8 +66,10 @@ if (BUILD_QT_UI)
         src/qt/MainWindow.cpp
         src/qt/ResultTableModel.cpp
         src/qt/TreemapWidget.cpp
+        src/qt/CategoryDonutWidget.cpp
         src/qt/resources.qrc
         "${CMAKE_CURRENT_BINARY_DIR}/generated/QtApp.rc"
+        src/core/CategoryStats.cpp
         src/core/DirectoryScanner.cpp
         src/core/DiskHealth.cpp
         src/core/FileHasher.cpp
