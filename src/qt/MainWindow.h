@@ -8,6 +8,7 @@
 #include "qt/ResultTableModel.h"
 #include "qt/TreemapWidget.h"
 #include "qt/CategoryDonutWidget.h"
+#include "qt/FileAgeHistogramWidget.h"
 
 #include <QMainWindow>
 #include <QString>
@@ -549,6 +550,11 @@ private:
     void PopulateTypeStatsTable();
 
     /**
+     * @brief 填充文件年龄直方图(按字节加权把扫描结果卷成 7 个年龄分带)。
+     */
+    void PopulateAgeHistogram();
+
+    /**
      * @brief 填充疑似重复树(快速视图:同名同大小分组,不哈希)。
      */
     void PopulateDuplicateTree();
@@ -981,6 +987,11 @@ private:
      * @brief 类型统计页右侧的分类占比环形图。
      */
     CategoryDonutWidget* typeStatsDonut_ = nullptr;
+
+    /**
+     * @brief 文件年龄分布直方图页(作为标签页直接挂载的自绘控件,setCurrentWidget/页签判定都用它)。
+     */
+    FileAgeHistogramWidget* ageHistogramWidget_ = nullptr;
 
     /**
      * @brief 疑似重复树(顶层=去重组,子项=各重复文件,带勾选框)。
@@ -1455,6 +1466,11 @@ private:
      * @brief 类型统计表格是否已经为当前扫描结果加载。
      */
     bool typeStatsTableLoaded_ = false;
+
+    /**
+     * @brief 文件年龄直方图是否已经为当前扫描结果加载。
+     */
+    bool ageHistogramLoaded_ = false;
 
     /**
      * @brief 疑似重复树是否已经为当前扫描结果加载。

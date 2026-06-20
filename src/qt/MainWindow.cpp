@@ -2,6 +2,7 @@
 
 #include "app/resource.h"
 #include "core/CategoryStats.h"
+#include "core/AgeStats.h"
 #include "core/Format.h"
 #include "core/LongPath.h"
 #include "qt/AppIcons.h"
@@ -3313,7 +3314,8 @@ void MainWindow::RunAfterClickFeedback(const QString& stateText, const QString& 
             || currentPage == largeFilesView_
             || currentPage == staleFilesView_
             || currentPage == typeStatsPage_
-            || currentPage == duplicatePage_;
+            || currentPage == duplicatePage_
+            || currentPage == ageHistogramWidget_;
         if (onDiskAnalysisPage) {
             SetInfoBar(
                 stateText,
@@ -3390,7 +3392,7 @@ void MainWindow::ShowShortcutHelp() {
     addHelpRow(QStringLiteral("移入回收站"), QStringLiteral("Delete"), QStringLiteral("对选中项执行受保护的回收站删除。"));
     addHelpRow(QStringLiteral("返回上级目录"), QStringLiteral("Backspace / Alt+Left"), QStringLiteral("目录内容页返回当前目录的上级。"));
     addHelpRow(QStringLiteral("导出当前列表"), QStringLiteral("Ctrl+E"), QStringLiteral("导出当前可见列表为 CSV。"));
-    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+8 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、长期未动、快速搜索、垃圾清理、磁盘健康。"));
+    addHelpRow(QStringLiteral("切换标签页"), QStringLiteral("Ctrl+1 至 Ctrl+9 / Ctrl+Tab"), QStringLiteral("快速切换目录内容、大文件、类型统计、疑似重复、长期未动、快速搜索、垃圾清理、磁盘健康、文件年龄。"));
     addHelpRow(QStringLiteral("查看说明"), QStringLiteral("F1"), QStringLiteral("打开本说明窗口。"));
     table->resizeRowsToContents();
 
@@ -3537,6 +3539,15 @@ void MainWindow::InstallShortcuts() {
             }
         });
     }
+
+    // 文件年龄直方图页(追加在 index 8):单独绑定 Ctrl+9,用 setCurrentWidget(指针)而非
+    // setCurrentIndex(下标),避免与既有 0..7 索引/隐藏 tab 产生耦合,回归面最小。
+    auto* ageTabShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+9")), this);
+    connect(ageTabShortcut, &QShortcut::activated, this, [this]() {
+        if (tabs_ != nullptr && ageHistogramWidget_ != nullptr) {
+            tabs_->setCurrentWidget(ageHistogramWidget_);
+        }
+    });
 
     auto* helpShortcut = new QShortcut(QKeySequence(QStringLiteral("F1")), this);
     connect(helpShortcut, &QShortcut::activated, this, &MainWindow::ShowShortcutHelp);
@@ -4110,6 +4121,10 @@ QWidget* MainWindow::CreateWorkspace() {
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
     tabs_->addTab(CreateCleanupTab(), QStringLiteral("垃圾清理"));
     tabs_->addTab(CreateHealthTab(), QStringLiteral("磁盘健康"));
+    // 文件年龄直方图页(追加在末尾=index 8,不改动既有 0..7 的索引与隐藏 tab,回归面最小)。
+    // 控件本身就是页(沿用 largeFilesView_/staleFilesView_ 的"控件即页"做法),故页签判定直接用它。
+    ageHistogramWidget_ = new FileAgeHistogramWidget(tabs_);
+    tabs_->addTab(ageHistogramWidget_, QStringLiteral("文件年龄"));
     tabs_->tabBar()->setTabVisible(5, false);
     tabs_->tabBar()->setTabVisible(6, false);
     tabs_->tabBar()->setTabVisible(7, false);
@@ -4698,7 +4713,8 @@ void MainWindow::UpdateModuleChrome() {
         currentPage == largeFilesView_ ||
         currentPage == staleFilesView_ ||
         currentPage == typeStatsPage_ ||
-        currentPage == duplicatePage_;
+        currentPage == duplicatePage_ ||
+        currentPage == ageHistogramWidget_;
 
     if (directoryTree_ != nullptr) {
         directoryTree_->setVisible(isDiskAnalysisPage);
@@ -4794,6 +4810,18 @@ void MainWindow::ApplyStyle() {
         donutColors.labelValue = QColor(t.textSecondary);
         donutColors.swatchBorder = QColor(t.cardBorder);
         typeStatsDonut_->SetColors(donutColors);
+    }
+
+    // 同步文件年龄直方图主题颜色(柱体固定彩色,这里只刷新背景/基线/文字)。
+    if (ageHistogramWidget_ != nullptr) {
+        qt_ui::HistogramColors histColors;
+        histColors.background = QColor(t.cardBg);
+        histColors.axisLine = QColor(t.cardBorder);
+        histColors.barTopValue = QColor(t.textPrimary);
+        histColors.bandLabel = QColor(t.textPrimary);
+        histColors.countLabel = QColor(t.textSecondary);
+        histColors.caption = QColor(t.textSecondary);
+        ageHistogramWidget_->SetColors(histColors);
     }
 
     // 样式表以 @token 形式占位，末尾用当前主题令牌统一替换，避免散落硬编码颜色。
@@ -5844,6 +5872,9 @@ void MainWindow::StartScan() {
     if (typeStatsDonut_ != nullptr) {
         typeStatsDonut_->Clear(QStringLiteral("正在扫描…"));
     }
+    if (ageHistogramWidget_ != nullptr) {
+        ageHistogramWidget_->Clear(QStringLiteral("正在扫描…"));
+    }
     CancelDuplicateContentScan();
     if (duplicateTree_ != nullptr) {
         duplicateTree_->clear();
@@ -6126,6 +6157,7 @@ void MainWindow::ResetDeferredTableStates() {
     typeStatsTableLoaded_ = false;
     duplicateTreeLoaded_ = false;
     staleFilesTableLoaded_ = false;
+    ageHistogramLoaded_ = false;
 
     if (largeFilesModel_ != nullptr) {
         largeFilesModel_->SetRows(QVector<ResultRow>{
@@ -6189,6 +6221,11 @@ void MainWindow::PopulateCurrentDeferredTab() {
     if (current == staleFilesView_ && !staleFilesTableLoaded_) {
         staleFilesTableLoaded_ = true;
         PopulateStaleFilesTable();
+        return;
+    }
+    if (current == ageHistogramWidget_ && !ageHistogramLoaded_) {
+        ageHistogramLoaded_ = true;
+        PopulateAgeHistogram();
     }
 }
 
@@ -6581,6 +6618,19 @@ void MainWindow::PopulateTypeStatsTable() {
     if (typeStatsDonut_ != nullptr) {
         typeStatsDonut_->SetCategories(core::ComputeExtensionCategories(*latestResult_));
     }
+}
+
+void MainWindow::PopulateAgeHistogram() {
+    if (ageHistogramWidget_ == nullptr) {
+        return;
+    }
+    if (!latestResult_) {
+        ageHistogramWidget_->Clear(QStringLiteral("暂无扫描结果"));
+        return;
+    }
+    // nowMsec 取扫描呈现时刻;用 ScanNode.lastModifiedMsec(同源 Unix epoch 毫秒)做差得到年龄天数。
+    const std::int64_t nowMsec = static_cast<std::int64_t>(QDateTime::currentMSecsSinceEpoch());
+    ageHistogramWidget_->SetBuckets(core::ComputeAgeBuckets(*latestResult_, nowMsec));
 }
 
 void MainWindow::PopulateDuplicateTree() {
