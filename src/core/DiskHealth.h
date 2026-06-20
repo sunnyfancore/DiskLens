@@ -93,6 +93,44 @@ struct DiskHealthInfo {
     int availableSparePercent = -1;
 
     /**
+     * @brief NVMe 可用备用阈值(%),-1 表示不适用/未读到。与 availableSparePercent 配对,判断备用块是否告急。
+     */
+    int nvmeAvailableSpareThreshold = -1;
+
+    /**
+     * @brief NVMe 寿命已用(%),-1 表示不适用/未读到。
+     *
+     * 即 SMART/Health 日志 byte5 Percentage Used,厂商按额定耐久度归一化,是 TBW 进度的权威指标
+     * (健康度 = 100 - 此值)。非 NVMe 盘保持 -1。
+     */
+    int nvmePercentageUsed = -1;
+
+    /**
+     * @brief NVMe 累计数据读取量(以 NVMe 数据单元计,-1 表示不适用/未读到)。1 数据单元 = 512000 字节(1000×512)。
+     */
+    long long nvmeDataUnitsRead = -1;
+
+    /**
+     * @brief NVMe 累计数据写入量(以 NVMe 数据单元计,-1 表示不适用/未读到)。1 数据单元 = 512000 字节;此即 TBW 来源。
+     */
+    long long nvmeDataUnitsWritten = -1;
+
+    /**
+     * @brief NVMe 非正常(掉电)关机次数,-1 表示不适用/未读到。
+     */
+    long long nvmeUnsafeShutdowns = -1;
+
+    /**
+     * @brief NVMe 介质错误数,-1 表示不适用/未读到。
+     */
+    long long nvmeMediaErrors = -1;
+
+    /**
+     * @brief NVMe 错误信息日志条目数,-1 表示不适用/未读到。
+     */
+    long long nvmeErrorLogEntries = -1;
+
+    /**
      * @brief ATA 重映射扇区数(属性 5),-1 表示未读到。
      */
     long long reallocatedSectorCount = -1;

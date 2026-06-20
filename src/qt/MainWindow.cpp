@@ -7030,7 +7030,41 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     }
     addRow(QStringLiteral("通电时长"), powerText);
     addRow(QStringLiteral("通电次数"), info.powerCycleCount >= 0 ? QString::number(static_cast<qlonglong>(info.powerCycleCount)) : dash);
-    addRow(QStringLiteral("可用备用(NVMe)"), info.availableSparePercent >= 0 ? QStringLiteral("%1%").arg(info.availableSparePercent) : dash);
+    // 可用备用:NVMe 盘显示当前值 + 阈值(便于一眼判断备用块是否告急);非 NVMe 仅在有值时显示。
+    if (info.availableSparePercent >= 0) {
+        QString spareValue = QStringLiteral("%1%").arg(info.availableSparePercent);
+        if (info.nvmeAvailableSpareThreshold >= 0) {
+            spareValue += QStringLiteral("（阈值 %1%）").arg(info.nvmeAvailableSpareThreshold);
+        }
+        addRow(QStringLiteral("可用备用(NVMe)"), spareValue);
+    } else {
+        addRow(QStringLiteral("可用备用(NVMe)"), dash);
+    }
+    // NVMe 耐久度明细(非 NVMe 盘这些字段保持 -1,逐字段跳过)。数据单元换算:NVMe 规范
+    // 1 数据单元 = 512000 字节(1000×512),不是 524288;累计写入即 TBW。
+    constexpr std::uint64_t nvmeDataUnitBytes = 512000ULL;
+    if (info.nvmePercentageUsed >= 0) {
+        addRow(QStringLiteral("寿命已用(NVMe)"), QStringLiteral("%1%").arg(info.nvmePercentageUsed));
+    }
+    if (info.nvmeDataUnitsWritten >= 0) {
+        const QString written = ToQString(core::FormatBytes(static_cast<std::uint64_t>(info.nvmeDataUnitsWritten) * nvmeDataUnitBytes));
+        addRow(QStringLiteral("累计写入(NVMe)"),
+               QStringLiteral("%1（约 %2 个数据单元）").arg(written, QString::number(static_cast<qlonglong>(info.nvmeDataUnitsWritten))));
+    }
+    if (info.nvmeDataUnitsRead >= 0) {
+        const QString read = ToQString(core::FormatBytes(static_cast<std::uint64_t>(info.nvmeDataUnitsRead) * nvmeDataUnitBytes));
+        addRow(QStringLiteral("累计读取(NVMe)"),
+               QStringLiteral("%1（约 %2 个数据单元）").arg(read, QString::number(static_cast<qlonglong>(info.nvmeDataUnitsRead))));
+    }
+    if (info.nvmeUnsafeShutdowns >= 0) {
+        addRow(QStringLiteral("非正常关机(NVMe)"), QString::number(static_cast<qlonglong>(info.nvmeUnsafeShutdowns)));
+    }
+    if (info.nvmeMediaErrors >= 0) {
+        addRow(QStringLiteral("介质错误(NVMe)"), QString::number(static_cast<qlonglong>(info.nvmeMediaErrors)));
+    }
+    if (info.nvmeErrorLogEntries >= 0) {
+        addRow(QStringLiteral("错误日志条目(NVMe)"), QString::number(static_cast<qlonglong>(info.nvmeErrorLogEntries)));
+    }
     addRow(QStringLiteral("重映射扇区"), info.reallocatedSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.reallocatedSectorCount)) : dash);
     addRow(QStringLiteral("当前待映射扇区"), info.currentPendingSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.currentPendingSectorCount)) : dash);
     addRow(QStringLiteral("离线无法校正扇区"), info.uncorrectableSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.uncorrectableSectorCount)) : dash);

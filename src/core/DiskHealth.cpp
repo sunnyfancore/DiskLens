@@ -200,6 +200,19 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
     info.powerCycleCount = readU128(112);
     info.powerOnHours = readU128(128);
 
+    // NVMe 耐久度明细:全部来自已校验的 log[] 缓冲(同上 readU128)。此处只读数暴露给详情对话框,
+    // 不参与下方状态判定(availableSpareThreshold/percentageUsed 在状态分支里本就各自已读)。
+    //   byte 32-47  Data Units Read        byte 48-63   Data Units Written(= TBW)
+    //   byte 144-159 Unsafe Shutdowns      byte 160-175 Media Errors
+    //   byte 176-191 Number of Error Info Log Entries
+    info.nvmeAvailableSpareThreshold = static_cast<int>(availableSpareThreshold);
+    info.nvmePercentageUsed = static_cast<int>(percentageUsed);
+    info.nvmeDataUnitsRead = readU128(32);
+    info.nvmeDataUnitsWritten = readU128(48);
+    info.nvmeUnsafeShutdowns = readU128(144);
+    info.nvmeMediaErrors = readU128(160);
+    info.nvmeErrorLogEntries = readU128(176);
+
     // 状态:NVMe SMART/Health Log(Log ID 02h)byte0 Critical Warning 共 5 个有效位,
     // 对照 NVMe 1.4/2.0 规范与 Microsoft NVME_HEALTH_INFO_LOG 文档:
     //   bit0(0x01) 可用备用低于阈值   bit1(0x02) 温度超阈值(过温)
