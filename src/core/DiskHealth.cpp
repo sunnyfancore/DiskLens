@@ -177,9 +177,9 @@ std::uint64_t QueryDiskTotalBytes(HANDLE handle) {
 }
 
 /**
- * @brief 取型号/序列号/总线类型;失败时各字段留空。
+ * @brief 取型号/序列号/固件版本/总线类型;失败时各字段留空。
  */
-void QueryStorageDevice(HANDLE handle, std::wstring& model, std::wstring& serial, STORAGE_BUS_TYPE& busType) {
+void QueryStorageDevice(HANDLE handle, std::wstring& model, std::wstring& serial, std::wstring& firmware, STORAGE_BUS_TYPE& busType) {
     busType = BusTypeUnknown;
     STORAGE_PROPERTY_QUERY query{};
     query.PropertyId = StorageDeviceProperty;
@@ -199,6 +199,7 @@ void QueryStorageDevice(HANDLE handle, std::wstring& model, std::wstring& serial
     std::wstring vendor = AnsiOffsetToString(buffer.data(), buffer.size(), desc->VendorIdOffset);
     std::wstring product = AnsiOffsetToString(buffer.data(), buffer.size(), desc->ProductIdOffset);
     serial = AnsiOffsetToString(buffer.data(), buffer.size(), desc->SerialNumberOffset);
+    firmware = AnsiOffsetToString(buffer.data(), buffer.size(), desc->ProductRevisionOffset);
 
     model = product;
     if (!vendor.empty()) {
@@ -309,6 +310,18 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
     info.nvmeUnsafeShutdowns = readU128(144);
     info.nvmeMediaErrors = readU128(160);
     info.nvmeErrorLogEntries = readU128(176);
+
+    // NVMe 多传感器温度:SMART/Health 日志 bytes 200-215 共 8 个 uint16(Kelvin 小端),逐个减 273 转摄氏。
+    // 值为 0(Kelvin)的传感器按 NVMe 规范视为未实现而跳过;复合温度(byte 1-2)已在上方 temperatureCelsius。
+    // 注意偏移是 200-215,绝非 bytes 78-87(后者落在 Host Read/Write Commands 计数器区,会读到垃圾)。
+    for (int sensor = 0; sensor < 8; ++sensor) {
+        const std::size_t off = 200 + static_cast<std::size_t>(sensor) * 2;
+        const std::uint16_t kelvin = static_cast<std::uint16_t>(log[off]) | (static_cast<std::uint16_t>(log[off + 1]) << 8);
+        if (kelvin == 0) {
+            continue;
+        }
+        info.nvmeTemperatureSensors.push_back(static_cast<int>(kelvin) - 273);
+    }
 
     // 状态:NVMe SMART/Health Log(Log ID 02h)byte0 Critical Warning 共 5 个有效位,
     // 对照 NVMe 1.4/2.0 规范与 Microsoft NVME_HEALTH_INFO_LOG 文档:
@@ -571,10 +584,12 @@ std::vector<DiskHealthInfo> DiskHealth::QueryAll() const {
 
         std::wstring model;
         std::wstring serial;
+        std::wstring firmware;
         STORAGE_BUS_TYPE busType = BusTypeUnknown;
-        QueryStorageDevice(handle, model, serial, busType);
+        QueryStorageDevice(handle, model, serial, firmware, busType);
         info.model = model;
         info.serial = serial;
+        info.firmwareRevision = firmware;
         info.totalBytes = QueryDiskTotalBytes(handle);
 
         std::wstring interfaceText;

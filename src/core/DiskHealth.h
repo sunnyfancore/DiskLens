@@ -92,6 +92,11 @@ struct DiskHealthInfo {
     std::wstring serial;
 
     /**
+     * @brief 固件版本号(来自 STORAGE_DEVICE_DESCRIPTOR.ProductRevisionOffset,所有总线通用);空表示未读到。
+     */
+    std::wstring firmwareRevision;
+
+    /**
      * @brief 接口类型:NVMe / SATA / USB / 未知。
      */
     std::wstring interfaceType;
@@ -163,6 +168,14 @@ struct DiskHealthInfo {
      * @brief NVMe 错误信息日志条目数,-1 表示不适用/未读到。
      */
     long long nvmeErrorLogEntries = -1;
+
+    /**
+     * @brief NVMe 温度传感器读数(摄氏度,仅 NVMe 盘)。
+     *
+     * 来自 SMART/Health 日志 bytes 200-215 的 8 个 uint16(Kelvin 小端),逐个减 273 转摄氏;
+     * 值为 0(Kelvin)的传感器按 NVMe 规范视为未实现而跳过。复合温度见 temperatureCelsius(byte 1-2)。
+     */
+    std::vector<int> nvmeTemperatureSensors;
 
     /**
      * @brief ATA 重映射扇区数(属性 5),-1 表示未读到。

@@ -7262,6 +7262,7 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     addRow(QStringLiteral("磁盘"), diskText);
     addRow(QStringLiteral("型号"), modelText);
     addRow(QStringLiteral("序列号"), info.serial.empty() ? dash : ToQString(info.serial));
+    addRow(QStringLiteral("固件版本"), info.firmwareRevision.empty() ? dash : ToQString(info.firmwareRevision));
     addRow(QStringLiteral("接口"), info.interfaceType.empty() ? dash : ToQString(info.interfaceType));
     addRow(QStringLiteral("容量"), info.totalBytes > 0 ? ToQString(core::FormatBytes(info.totalBytes)) : dash);
     addRow(QStringLiteral("健康度"), info.healthPercent >= 0 ? QStringLiteral("%1%").arg(info.healthPercent) : dash);
@@ -7312,6 +7313,15 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     }
     if (info.nvmeErrorLogEntries >= 0) {
         addRow(QStringLiteral("错误日志条目(NVMe)"), QString::number(static_cast<qlonglong>(info.nvmeErrorLogEntries)));
+    }
+    // NVMe 多传感器温度:复合温度已在上方“温度”行,这里列出各独立传感器(通常 2-8 个),便于发现局部热点。
+    if (!info.nvmeTemperatureSensors.empty()) {
+        QString sensorsText;
+        for (std::size_t i = 0; i < info.nvmeTemperatureSensors.size(); ++i) {
+            sensorsText += (i == 0 ? QString() : QStringLiteral("  ·  "))
+                           + QStringLiteral("传感器%1: %2 °C").arg(static_cast<int>(i + 1)).arg(info.nvmeTemperatureSensors[i]);
+        }
+        addRow(QStringLiteral("温度传感器(NVMe)"), sensorsText);
     }
     addRow(QStringLiteral("重映射扇区"), info.reallocatedSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.reallocatedSectorCount)) : dash);
     addRow(QStringLiteral("当前待映射扇区"), info.currentPendingSectorCount >= 0 ? QString::number(static_cast<qlonglong>(info.currentPendingSectorCount)) : dash);
