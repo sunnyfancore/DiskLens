@@ -124,6 +124,11 @@ private slots:
      */
     void HandleScanFinished();
 
+    /**
+     * @brief 比较刚完成的扫描与该路径上次扫描的持久化基线,显著增长时显示告警横幅,并把当前结果写为新基线。
+     */
+    void EvaluateGrowthAlert();
+
 private:
     /**
      * @brief 快速搜索索引记录的前置声明。
@@ -1591,6 +1596,16 @@ private:
      * @brief 扫描模式指标数值。
      */
     QLabel* modeMetricLabel_ = nullptr;
+
+    /**
+     * @brief 磁盘增长告警横幅(置于 metricsPanel_ 内,默认隐藏;扫描完成且相较上次基线显著增长时显示)。
+     */
+    QFrame* growthAlertFrame_ = nullptr;
+
+    /**
+     * @brief 增长告警横幅的正文标签("自 <上次时间> 以来,增长 X · Y%")。
+     */
+    QLabel* growthAlertBodyLabel_ = nullptr;
 
     /**
      * @brief 实时状态文本。

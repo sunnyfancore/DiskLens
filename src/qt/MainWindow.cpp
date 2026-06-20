@@ -685,6 +685,23 @@ std::wstring ToWideString(const QString& value) {
 }
 
 /**
+ * @brief 把扫描根路径转成 QSettings 安全键段(字母数字保留,其余替换为 '_')。
+ *
+ * 路径含 ':'、'\\'、'/' 等,QSettings 键里这些字符会被当作分组分隔符或非法字符,
+ * 故归一化为纯字母数字+下划线(如 "C:\Users" → "C__Users")。不同根路径几乎不会冲突。
+ * @param path 扫描根路径。
+ * @return 可直接拼接进 QSettings 键名的安全段。
+ */
+QString SanitizeSettingsKey(const QString& path) {
+    QString out;
+    out.reserve(path.size());
+    for (const QChar& ch : path) {
+        out += ch.isLetterOrNumber() ? ch : QLatin1Char('_');
+    }
+    return out.isEmpty() ? QStringLiteral("root") : out;
+}
+
+/**
  * @brief 将文本转义为 CSV 字段。
  * @param value 原始文本。
  * @return CSV 字段。
@@ -4009,6 +4026,33 @@ QWidget* MainWindow::CreateWorkspace() {
     metricsLayout->setColumnStretch(2, 1);
     metricsLayout->setColumnStretch(3, 1);
 
+    // 磁盘增长告警横幅:置于度量面板第二行(跨 4 列),默认隐藏;显著增长时由 EvaluateGrowthAlert 显示。
+    growthAlertFrame_ = new QFrame(metrics);
+    growthAlertFrame_->setObjectName(QStringLiteral("GrowthAlert"));
+    auto* growthLayout = new QHBoxLayout(growthAlertFrame_);
+    growthLayout->setContentsMargins(12, 8, 8, 8);
+    growthLayout->setSpacing(10);
+    auto* growthTitle = new QLabel(QStringLiteral("⚠  增长告警"), growthAlertFrame_);
+    growthTitle->setObjectName(QStringLiteral("GrowthAlertTitle"));
+    growthAlertBodyLabel_ = new QLabel(growthAlertFrame_);
+    growthAlertBodyLabel_->setObjectName(QStringLiteral("GrowthAlertBody"));
+    growthAlertBodyLabel_->setTextFormat(Qt::PlainText);
+    growthAlertBodyLabel_->setWordWrap(true);
+    auto* growthClose = new QPushButton(QStringLiteral("×"), growthAlertFrame_);
+    growthClose->setObjectName(QStringLiteral("GrowthAlertClose"));
+    growthClose->setCursor(Qt::PointingHandCursor);
+    growthClose->setToolTip(QStringLiteral("关闭告警(下次扫描会重新评估)"));
+    growthLayout->addWidget(growthTitle);
+    growthLayout->addWidget(growthAlertBodyLabel_, 1);
+    growthLayout->addWidget(growthClose);
+    metricsLayout->addWidget(growthAlertFrame_, 1, 0, 1, 4);
+    growthAlertFrame_->setVisible(false);
+    connect(growthClose, &QPushButton::clicked, this, [this]() {
+        if (growthAlertFrame_ != nullptr) {
+            growthAlertFrame_->setVisible(false);
+        }
+    });
+
     tabs_ = new QTabWidget(rightPanel);
     tabs_->setObjectName(QStringLiteral("ModuleTabs"));
     tabs_->setTabPosition(QTabWidget::North);
@@ -5360,6 +5404,36 @@ void MainWindow::ApplyStyle() {
             font-weight: 800;
         }
 
+        /* 磁盘增长告警横幅:度量卡观感 + 左侧 @warn 提示条,与三主题协调 */
+        QFrame#GrowthAlert {
+            background: @cardBg;
+            border: 1px solid @cardBorder;
+            border-left: 4px solid @warn;
+            border-radius: @cardRadius;
+        }
+        QLabel#GrowthAlertTitle {
+            color: @warn;
+            font-weight: 700;
+            font-size: @fsCaption;
+        }
+        QLabel#GrowthAlertBody {
+            color: @textPrimary;
+            font-size: @fsBody;
+        }
+        QPushButton#GrowthAlertClose {
+            background: transparent;
+            border: none;
+            color: @textMuted;
+            font-size: @fsTitle;
+            padding: 0 8px;
+            min-width: 24px;
+        }
+        QPushButton#GrowthAlertClose:hover {
+            color: @danger;
+            background: @accentSoft;
+            border-radius: @controlRadius;
+        }
+
         /* 左侧导航品牌页脚 */
         QLabel#ModuleNavFooter {
             color: @textMuted;
@@ -5875,6 +5949,9 @@ void MainWindow::StartScan() {
     if (ageHistogramWidget_ != nullptr) {
         ageHistogramWidget_->Clear(QStringLiteral("正在扫描…"));
     }
+    if (growthAlertFrame_ != nullptr) {
+        growthAlertFrame_->setVisible(false);  // 旧告警失效,待本次扫描完成由 EvaluateGrowthAlert 重新评估。
+    }
     CancelDuplicateContentScan();
     if (duplicateTree_ != nullptr) {
         duplicateTree_->clear();
@@ -6100,7 +6177,68 @@ void MainWindow::HandleScanFinished() {
             latestResult_->fileCount,
             latestResult_->directoryCount,
             lastScanModeDetail_.isEmpty() ? (latestResult_->root ? ToQString(latestResult_->root->path) : QString()) : lastScanModeDetail_);
+        EvaluateGrowthAlert();
     }
+}
+
+void MainWindow::EvaluateGrowthAlert() {
+    if (growthAlertFrame_ == nullptr || latestResult_ == nullptr || latestResult_->root == nullptr) {
+        return;
+    }
+    growthAlertFrame_->setVisible(false);  // 默认隐藏,满足阈值才显示。
+
+    const QString rootPath = ToQString(latestResult_->root->path);
+    const std::uint64_t currentBytes = latestResult_->root->totalBytes;
+    const qint64 nowMsec = QDateTime::currentMSecsSinceEpoch();
+
+    QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
+    const QString key = QStringLiteral("growth/") + SanitizeSettingsKey(rootPath);
+    const QStringList baseline = settings.value(key).toStringList();
+
+    // 基线格式:["<totalBytes>", "<fileCount>", "<epochMsec>"]。至少需 totalBytes 才能比较。
+    if (baseline.size() >= 1) {
+        bool okBytes = false;
+        const std::uint64_t baselineBytes = static_cast<std::uint64_t>(baseline[0].toULongLong(&okBytes));
+        if (okBytes) {
+            // 增长量(currentBytes 减基线;若反而缩小则不计入告警)。
+            const std::uint64_t growth = (currentBytes > baselineBytes) ? (currentBytes - baselineBytes) : 0;
+            // 阈值:绝对下限 100 MiB,且(基线为 0 时仅看绝对;否则需达到基线的 1%),避免在大盘上对微小变化误报。
+            constexpr std::uint64_t kFloorBytes = 100ULL * 1024ULL * 1024ULL;
+            bool notable = (growth >= kFloorBytes);
+            if (notable && baselineBytes > 0) {
+                notable = (growth * 100ULL >= baselineBytes);  // growth >= 1% baseline
+            }
+            if (notable) {
+                const QString growthText = ToQString(core::FormatBytes(growth));
+                QString detailText;
+                if (baselineBytes > 0) {
+                    const double pct = (static_cast<double>(growth) / static_cast<double>(baselineBytes)) * 100.0;
+                    detailText = QStringLiteral(" · %1%").arg(pct, 0, 'f', 1);
+                }
+                QString sinceText = QStringLiteral("相比上次扫描");
+                if (baseline.size() >= 3) {
+                    bool okMsec = false;
+                    const qint64 baseMsec = baseline[2].toLongLong(&okMsec);
+                    if (okMsec && baseMsec > 0) {
+                        sinceText = QStringLiteral("自 %1 以来")
+                                        .arg(QDateTime::fromMSecsSinceEpoch(baseMsec)
+                                                 .toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+                    }
+                }
+                growthAlertBodyLabel_->setText(
+                    sinceText + QStringLiteral(",") + rootPath + QStringLiteral(" 增长 ")
+                    + growthText + detailText);
+                growthAlertFrame_->setVisible(true);
+            }
+        }
+    }
+
+    // 无论是否告警,都把当前结果写为新基线,使下次扫描比较的是"上一次"。
+    settings.setValue(key, QStringList{
+        QString::number(static_cast<qulonglong>(currentBytes)),
+        QString::number(static_cast<qulonglong>(latestResult_->fileCount)),
+        QString::number(nowMsec),
+    });
 }
 
 void MainWindow::PopulateScanResult() {
