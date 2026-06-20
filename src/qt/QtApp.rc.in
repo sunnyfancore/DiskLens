@@ -1,0 +1,50 @@
+#pragma code_page(65001)
+
+#include <windows.h>
+#include "@CMAKE_CURRENT_SOURCE_DIR@/src/app/resource.h"
+
+/**
+ * @brief Qt 市场版应用主图标资源。
+ *
+ * 本文件由 CMakeLists.txt 的 configure_file 从 QtApp.rc.in 生成到构建目录;
+ * 版本号取自 project(DiskLens VERSION ...)。资源路径用 CMAKE_CURRENT_SOURCE_DIR
+ * 绝对路径,因生成产物位于构建目录而非 src/qt,相对路径会失配。
+ */
+1 ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/app/assets/app.ico"
+IDI_APP_ICON ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/app/assets/app.ico"
+
+// 嵌入应用清单:UAC requireAdministrator + 公共控件 v6 + supportedOS(Win10/11) + PerMonitorV2 DPI + longPathAware。
+// 链接器设 /MANIFEST:NO,此资源即进程唯一清单。
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "@CMAKE_CURRENT_SOURCE_DIR@/src/qt/DiskLens.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DiskLens_VERSION_MAJOR@,@DiskLens_VERSION_MINOR@,@DiskLens_VERSION_PATCH@,0
+ PRODUCTVERSION @DiskLens_VERSION_MAJOR@,@DiskLens_VERSION_MINOR@,@DiskLens_VERSION_PATCH@,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName", "SunnyFan"
+            VALUE "FileDescription", "磁盘洞察"
+            VALUE "FileVersion", "@DiskLens_VERSION_MAJOR@.@DiskLens_VERSION_MINOR@.@DiskLens_VERSION_PATCH@"
+            VALUE "InternalName", "磁盘洞察"
+            VALUE "OriginalFilename", "磁盘洞察.exe"
+            VALUE "ProductName", "磁盘洞察"
+            VALUE "ProductVersion", "@DiskLens_VERSION_MAJOR@.@DiskLens_VERSION_MINOR@.@DiskLens_VERSION_PATCH@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

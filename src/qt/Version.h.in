@@ -1,0 +1,11 @@
+#pragma once
+
+// 本文件由 CMakeLists.txt 的 configure_file 从 project(DiskLens VERSION ...) 自动生成,勿手改。
+// 版本号的唯一来源是 CMakeLists.txt 顶部的 project(DiskLens VERSION x.y.z)。
+
+#define DISKLENS_VERSION_MAJOR @DiskLens_VERSION_MAJOR@
+#define DISKLENS_VERSION_MINOR @DiskLens_VERSION_MINOR@
+#define DISKLENS_VERSION_PATCH @DiskLens_VERSION_PATCH@
+
+// 形如 "0.1.0" 的版本字符串字面量(供 QStringLiteral 等直接使用)。
+#define DISKLENS_VERSION_STRING "@DiskLens_VERSION_MAJOR@.@DiskLens_VERSION_MINOR@.@DiskLens_VERSION_PATCH@"

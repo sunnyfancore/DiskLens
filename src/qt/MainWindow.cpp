@@ -4,6 +4,7 @@
 #include "core/Format.h"
 #include "core/LongPath.h"
 #include "qt/AppIcons.h"
+#include "Version.h"
 
 #include <QAction>
 #include <QApplication>
@@ -3700,7 +3701,7 @@ QWidget* MainWindow::CreateApplicationMenu() {
         titleBlock->setSpacing(2);
         auto* titleLabel = new QLabel(QStringLiteral("磁盘洞察 DiskLens"), &dialog);
         titleLabel->setObjectName(QStringLiteral("AboutTitle"));
-        auto* versionLabel = new QLabel(QStringLiteral("版本 0.1.0"), &dialog);
+        auto* versionLabel = new QLabel(QStringLiteral("版本 ") + QStringLiteral(DISKLENS_VERSION_STRING), &dialog);
         versionLabel->setObjectName(QStringLiteral("AboutVersion"));
         titleBlock->addWidget(titleLabel);
         titleBlock->addWidget(versionLabel);
@@ -3884,7 +3885,7 @@ QWidget* MainWindow::CreateModuleSidebar() {
     footerDivider->setFixedHeight(1);
     layout->addWidget(footerDivider);
 
-    auto* footerLabel = new QLabel(QStringLiteral("v0.1.0 · SunnyFan"), frame);
+    auto* footerLabel = new QLabel(QStringLiteral("v") + QStringLiteral(DISKLENS_VERSION_STRING) + QStringLiteral(" · SunnyFan"), frame);
     footerLabel->setObjectName(QStringLiteral("ModuleNavFooter"));
     footerLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     layout->addWidget(footerLabel);

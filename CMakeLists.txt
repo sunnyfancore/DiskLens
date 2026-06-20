@@ -48,6 +48,18 @@ if (BUILD_QT_UI)
     set(CMAKE_AUTORCC ON)
     find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+    # 版本号的唯一来源是顶部 project(DiskLens VERSION ...);由 configure_file 把 .in 模板
+    # 生成到构建目录,避免在 C++ 与 .rc 中分散手写版本字面量导致漂移(MSVC 的 RC 编译器
+    # 不运行 C 预处理器,故 .rc 走独立 @VAR@ 替换而非 #include 宏)。
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/qt/Version.h.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
+        @ONLY)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/qt/QtApp.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/QtApp.rc"
+        @ONLY)
+
     add_executable(DiskLens WIN32
         src/qt/main.cpp
         src/qt/AppIcons.cpp
@@ -55,7 +67,7 @@ if (BUILD_QT_UI)
         src/qt/ResultTableModel.cpp
         src/qt/TreemapWidget.cpp
         src/qt/resources.qrc
-        src/qt/QtApp.rc
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/QtApp.rc"
         src/core/DirectoryScanner.cpp
         src/core/DiskHealth.cpp
         src/core/FileHasher.cpp
@@ -64,7 +76,7 @@ if (BUILD_QT_UI)
         src/core/NtfsMftScanner.cpp
     )
 
-    target_include_directories(DiskLens PRIVATE src)
+    target_include_directories(DiskLens PRIVATE src "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_compile_definitions(DiskLens PRIVATE
         UNICODE
         _UNICODE
