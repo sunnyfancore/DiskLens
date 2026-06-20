@@ -32,6 +32,40 @@ enum class DiskHealthStatus {
 };
 
 /**
+ * @brief 单条 ATA SMART 属性(SMART READ DATA 中 12 字节属性项的可读投影)。
+ *
+ * 与 DiskHealthInfo 上的专用标量字段(重映射/待映射扇区等)互补:专用字段驱动状态判定,
+ * 本结构给用户呈现完整可读明细。原始值取属性项 base+5..10 的 6 字节小端;当前值/最差值
+ * 取 base+3/base+4(厂商自定义归一化刻度,与 CrystalDiskInfo 等工具一致)。
+ */
+struct SmartAttribute {
+    /**
+     * @brief 属性 ID(如 5、194、241)。
+     */
+    int id = 0;
+
+    /**
+     * @brief 中文属性名;未识别 ID 形如 "属性 123"。
+     */
+    std::wstring name;
+
+    /**
+     * @brief 当前归一化值(0-253 厂商刻度;越大通常越好)。
+     */
+    int value = -1;
+
+    /**
+     * @brief 历史最差归一化值。
+     */
+    int worst = -1;
+
+    /**
+     * @brief 原始值(6 字节小端),如温度、扇区计数、小时数。
+     */
+    long long raw = 0;
+};
+
+/**
  * @brief 单个物理盘的健康信息快照。
  *
  * 任何字段读不到时保持默认的 -1 / 空,**绝不抛异常**;调用方据此显示"不可读取"而不会崩溃。
@@ -144,6 +178,14 @@ struct DiskHealthInfo {
      * @brief ATA 离线无法校正扇区数(属性 198),-1 表示未读到。
      */
     long long uncorrectableSectorCount = -1;
+
+    /**
+     * @brief ATA SMART READ DATA 解析出的全部属性(按磁盘返回顺序;NVMe/USB 盘为空)。
+     *
+     * 与上面的专用字段互补:专用字段(重映射/待映射扇区等)驱动状态判定,本表给用户完整可读明细。
+     * 仅在 QueryAtaSmart 成功解析时填充,最多 30 项(READ DATA 属性目录容量)。
+     */
+    std::vector<SmartAttribute> smartAttributes;
 
     /**
      * @brief 健康等级。

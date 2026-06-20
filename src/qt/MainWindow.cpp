@@ -7223,7 +7223,8 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("磁盘健康详情"));
     dialog.setWindowIcon(windowIcon());
-    dialog.resize(600, 560);
+    // ATA 盘带 SMART 全量属性表时加高对话框,避免上下两个表互相挤压。
+    dialog.resize(600, info.smartAttributes.empty() ? 560 : 720);
 
     auto* layout = new QVBoxLayout(&dialog);
     layout->setContentsMargins(20, 18, 20, 16);
@@ -7327,6 +7328,49 @@ void MainWindow::ShowHealthDetailDialog(int row) {
 
     layout->addWidget(titleLabel);
     layout->addWidget(detailTable, 1);
+
+    // ATA SMART 全量属性明细(仅 SATA/ATA 盘经 SMART READ DATA 解析得到;NVMe/USB 为空,整段跳过)。
+    if (!info.smartAttributes.empty()) {
+        auto* smartCaption = new QLabel(QStringLiteral("SMART 属性(ATA 直读,共 %1 项)").arg(info.smartAttributes.size()), &dialog);
+        smartCaption->setObjectName(QStringLiteral("AboutTitle"));
+        layout->addWidget(smartCaption);
+
+        auto* smartTable = new QTableWidget(static_cast<int>(info.smartAttributes.size()), 5, &dialog);
+        smartTable->setObjectName(QStringLiteral("CleanupTree"));
+        smartTable->setHorizontalHeaderLabels({QStringLiteral("ID"), QStringLiteral("属性"),
+                                               QStringLiteral("当前值"), QStringLiteral("最差值"), QStringLiteral("原始值")});
+        smartTable->verticalHeader()->setVisible(false);
+        smartTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+        smartTable->setSelectionMode(QAbstractItemView::SingleSelection);
+        smartTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        smartTable->setAlternatingRowColors(true);
+        smartTable->setShowGrid(false);
+        smartTable->setTextElideMode(Qt::ElideRight);
+        smartTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);   // ID
+        smartTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);            // 属性名
+        smartTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);   // 当前值
+        smartTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);   // 最差值
+        smartTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Stretch);            // 原始值
+        for (int r = 0; r < static_cast<int>(info.smartAttributes.size()); ++r) {
+            const core::SmartAttribute& a = info.smartAttributes[static_cast<std::size_t>(r)];
+            auto* idItem = new QTableWidgetItem(QString::number(a.id));
+            auto* nameItem = new QTableWidgetItem(ToQString(a.name));
+            nameItem->setToolTip(ToQString(a.name));
+            auto* valueItem = new QTableWidgetItem(QString::number(a.value));
+            valueItem->setToolTip(QStringLiteral("当前归一化值(厂商刻度,越大通常越好)"));
+            auto* worstItem = new QTableWidgetItem(QString::number(a.worst));
+            worstItem->setToolTip(QStringLiteral("历史最差归一化值"));
+            auto* rawItem = new QTableWidgetItem(QString::number(static_cast<qlonglong>(a.raw)));
+            rawItem->setToolTip(QString::number(static_cast<qlonglong>(a.raw)));
+            smartTable->setItem(r, 0, idItem);
+            smartTable->setItem(r, 1, nameItem);
+            smartTable->setItem(r, 2, valueItem);
+            smartTable->setItem(r, 3, worstItem);
+            smartTable->setItem(r, 4, rawItem);
+        }
+        smartTable->resizeRowsToContents();
+        layout->addWidget(smartTable, 1);
+    }
 
     // 失败原因 / 数据来源备注单独成段:可换行、可选中复制,直接解决表格列省略、tooltip 不可靠的痛点。
     const QString noteText = info.note.empty() ? QString() : ToQString(info.note);

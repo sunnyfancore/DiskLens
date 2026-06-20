@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <windows.h>
@@ -38,6 +39,102 @@ std::wstring AnsiOffsetToString(const unsigned char* buffer, std::size_t bufferS
 std::wstring ByteToHex(unsigned char value) {
     const wchar_t* digits = L"0123456789ABCDEF";
     return std::wstring(1, digits[value >> 4]) + std::wstring(1, digits[value & 0x0F]);
+}
+
+/**
+ * @brief ATA SMART 属性 ID → 中文名。覆盖常见 60 余项;未命中返回 "属性 N"。
+ *
+ * 名称对照 smartmontools / CrystalDiskInfo 的通行译法,SSD 专属属性(170-242)一并收录。
+ * 仅用于详情对话框的可读展示,不参与状态判定。
+ */
+const std::unordered_map<int, std::wstring>& SmartAttributeNames() {
+    static const std::unordered_map<int, std::wstring> names = []() {
+        std::unordered_map<int, std::wstring> m;
+        const auto add = [&m](int id, const wchar_t* name) { m[id] = name; };
+        add(1, L"读取错误率");
+        add(2, L"吞吐性能");
+        add(3, L"主轴起转时间");
+        add(4, L"主轴起停次数");
+        add(5, L"重映射扇区数");
+        add(6, L"读取通道裕量");
+        add(7, L"寻道错误率");
+        add(8, L"寻道时间性能");
+        add(9, L"通电小时数");
+        add(10, L"主轴重试次数");
+        add(11, L"校准重试次数");
+        add(12, L"通电次数");
+        add(13, L"软读取错误率");
+        add(22, L"氦气等级");
+        add(170, L"可用预留空间");
+        add(171, L"编程失败计数");
+        add(172, L"擦除失败计数");
+        add(173, L"平均擦除次数");
+        add(174, L"意外掉电次数");
+        add(175, L"掉电保护失败");
+        add(176, L"擦除失败计数(块)");
+        add(177, L"磨损范围差值");
+        add(178, L"已用预留块(校验)");
+        add(179, L"已用预留块(总)");
+        add(180, L"未用预留块");
+        add(181, L"编程失败计数(总)");
+        add(182, L"擦除失败计数(总)");
+        add(183, L"SATA 降速次数");
+        add(184, L"端到端错误");
+        add(187, L"已报告不可校正错误");
+        add(188, L"命令超时");
+        add(189, L"高空写入");
+        add(190, L"气流温度");
+        add(191, L"冲击传感器");
+        add(192, L"断电缩回计数");
+        add(193, L"磁头加载周期");
+        add(194, L"温度");
+        add(195, L"硬件 ECC 已恢复");
+        add(196, L"重映射事件计数");
+        add(197, L"当前待映射扇区");
+        add(198, L"离线无法校正");
+        add(199, L"Ultra DMA CRC 错误");
+        add(200, L"写入错误率");
+        add(201, L"软读取错误率(2)");
+        add(202, L"数据地址标记错误");
+        add(203, L"软 ECC 错误");
+        add(204, L"软 ECC 校正");
+        add(205, L"热非对称率");
+        add(206, L"飞行高度");
+        add(207, L"主轴高速过流");
+        add(208, L"主轴蜂鸣");
+        add(209, L"离线寻道性能");
+        add(211, L"写入时振动");
+        add(212, L"写入时冲击");
+        add(220, L"磁盘位移");
+        add(221, L"冲击错误率");
+        add(222, L"加载已用小时");
+        add(223, L"加载/卸载重试");
+        add(224, L"加载摩擦");
+        add(225, L"加载/卸载周期");
+        add(226, L"加载时间");
+        add(227, L"转矩放大计数");
+        add(228, L"断电缩回周期");
+        add(230, L"磁头幅度");
+        add(231, L"SSD 剩余寿命");
+        add(232, L"耐久剩余");
+        add(233, L"介质磨损指示");
+        add(234, L"平均擦除次数(2)");
+        add(241, L"写入 LBA 总数");
+        add(242, L"读取 LBA 总数");
+        add(249, L"NAND 写入量");
+        add(250, L"读取错误重试率");
+        return m;
+    }();
+    return names;
+}
+
+std::wstring SmartAttributeName(int id) {
+    const auto& names = SmartAttributeNames();
+    const auto found = names.find(id);
+    if (found != names.end()) {
+        return found->second;
+    }
+    return L"属性 " + std::to_wstring(id);
 }
 
 /**
@@ -255,6 +352,11 @@ void ParseAtaSmartAttributes(const unsigned char* data, DiskHealthInfo& info) {
             raw |= static_cast<unsigned long long>(data[base + b]) << (8 * (b - 5));
         }
         const long long rawValue = static_cast<long long>(raw);
+        // 当前归一化值(base+3)、最差值(base+4):ATA SMART 属性 12 字节项的标准布局,
+        // 与 smartmontools / CrystalDiskInfo 一致。
+        const int value = static_cast<int>(data[base + 3]);
+        const int worst = static_cast<int>(data[base + 4]);
+
         switch (id) {
             case 5:
                 info.reallocatedSectorCount = rawValue;
@@ -277,6 +379,10 @@ void ParseAtaSmartAttributes(const unsigned char* data, DiskHealthInfo& info) {
             default:
                 break;
         }
+
+        // 全量明细:无论是否命中上面的专用字段,都把这条属性登记进 smartAttributes 供详情对话框展示。
+        info.smartAttributes.push_back({static_cast<int>(id), SmartAttributeName(static_cast<int>(id)),
+                                        value, worst, rawValue});
     }
 }
 
