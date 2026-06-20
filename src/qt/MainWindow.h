@@ -81,6 +81,24 @@ protected:
     void showEvent(QShowEvent* event) override;
 
     /**
+     * @brief 拖拽进入窗口:仅当携带本地文件/目录 URL 时接受,决定拖放光标形态。
+     * @param event Qt 拖拽进入事件。
+     */
+    void dragEnterEvent(QDragEnterEvent* event) override;
+
+    /**
+     * @brief 拖拽在窗口内移动:持续接受以保持光标。
+     * @param event Qt 拖拽移动事件。
+     */
+    void dragMoveEvent(QDragMoveEvent* event) override;
+
+    /**
+     * @brief 放下:取首个本地路径,目录直接扫描、文件则扫描其所在目录。
+     * @param event Qt 放下事件。
+     */
+    void dropEvent(QDropEvent* event) override;
+
+    /**
      * @brief 跟踪空状态遮罩所在视口的尺寸与显隐，使遮罩始终铺满视口。
      * @param watched 被监视对象（各主功能页视图的视口）。
      * @param event Qt 事件。

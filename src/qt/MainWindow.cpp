@@ -19,6 +19,9 @@
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
@@ -1887,6 +1890,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     setCentralWidget(rootWidget_);
     // 设置最小尺寸，避免窗口过小时控件错位/裁剪，符合桌面商业软件规范。
     setMinimumSize(980, 600);
+    // 允许从资源管理器拖入文件夹直接扫描。子控件(目录树/表格/Treemap/空状态遮罩)
+    // 均未开启 acceptDrops,拖放事件会冒泡到本顶层窗口统一处理,与遮罩无冲突。
+    setAcceptDrops(true);
     for (QPushButton* button : findChildren<QPushButton*>()) {
         button->setCursor(Qt::PointingHandCursor);
     }
@@ -5593,6 +5599,67 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (event == nullptr || event->mimeData() == nullptr || !event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    // 只接受带本地文件/目录 URL 的拖入(从资源管理器拖文件夹进来)。
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (url.isLocalFile()) {
+            event->acceptProposedAction();
+            return;
+        }
+    }
+    event->ignore();
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent* event) {
+    if (event != nullptr && event->mimeData() != nullptr && event->mimeData()->hasUrls()) {
+        event->acceptProposedAction();
+    } else {
+        event->ignore();
+    }
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    if (event == nullptr || event->mimeData() == nullptr || !event->mimeData()->hasUrls()) {
+        event->ignore();
+        return;
+    }
+    // 扫描进行中不接新拖放(StartScan 本身也拒绝并发扫描,这里提前给出提示更友好)。
+    if (scanning_.load()) {
+        SetInfoBar(QStringLiteral("扫描中"), 0, 0, QStringLiteral("当前扫描结束后再拖入文件夹"));
+        event->ignore();
+        return;
+    }
+    // 取首个本地路径:目录直接扫;文件则扫其所在目录(便于直接拖一个文件过来分析其所在文件夹)。
+    QString droppedPath;
+    for (const QUrl& url : event->mimeData()->urls()) {
+        if (url.isLocalFile()) {
+            droppedPath = url.toLocalFile();
+            break;
+        }
+    }
+    if (droppedPath.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    const QFileInfo droppedInfo(droppedPath);
+    QString targetPath = droppedPath;
+    if (droppedInfo.isFile()) {
+        targetPath = droppedInfo.absolutePath();
+    }
+    if (targetPath.isEmpty()) {
+        event->ignore();
+        return;
+    }
+    event->acceptProposedAction();
+    // RescanPath 设定 driveCombo_ 文本并 StartScan;StartScan 会把新路径插入下拉顶部,
+    // 下次 SaveUiSettings 自动归入 scan/recentPaths MRU,无需单独维护最近列表。
+    RescanPath(targetPath);
 }
 
 void MainWindow::InstallEmptyStateOverlays() {
