@@ -22,7 +22,10 @@ public:
     /**
      * @brief 执行 NTFS MFT 快速扫描。
      * @param rootPath 要扫描的卷根路径。
-     * @return 扫描结果。
+     * @return 扫描结果(扫描被 RequestCancel() 取消时返回已读到的部分结果)。
+     *
+     * 取消语义与 DirectoryScanner 对等:外部调 RequestCancel() 后,MFT 读取循环
+     * 在下个记录边界提前退出,已读条目照常构建为部分树返回(不再回退兼容扫描)。
      */
     ScanResult Scan(const std::wstring& rootPath);
 
@@ -48,6 +51,21 @@ public:
      * @return 增量变更结果；Journal 不连续时 requiresFullRebuild 为 true。
      */
     FileIndexChangeResult ReadFileIndexChanges(const UsnJournalState& previousState, const std::atomic_bool& cancelFlag) const;
+
+    /**
+     * @brief 请求取消正在进行的 Scan()(与 DirectoryScanner::RequestCancel 对等)。
+     *
+     * 仅作用于 Scan();BuildFileIndex/ReadFileIndexChanges 用各自的 cancelFlag 参数。
+     */
+    void RequestCancel();
+
+    /**
+     * @brief Scan() 是否被取消(供调用方判断是否跳过兼容回退)。
+     */
+    bool IsCancelled() const;
+
+private:
+    std::atomic_bool cancelled_{false};
 };
 
 }  // namespace disk_lens::core

@@ -5804,6 +5804,7 @@ void MainWindow::StartScan() {
         bool usedNtfsMft = false;
         bool ntfsValidationFailed = false;
         bool ntfsAttempted = false;
+        bool mftScanCancelled = false;
         QString modeText = QStringLiteral("兼容");
         QString modeDetail = QStringLiteral("未使用 NTFS MFT 极速通道");
 
@@ -5815,11 +5816,15 @@ void MainWindow::StartScan() {
                     SetInfoBar(QStringLiteral("NTFS 极速扫描"), 0, 0, rootPath);
                 }, Qt::QueuedConnection);
                 *result = ntfsScanner_.Scan(wideRootPath);
+                mftScanCancelled = ntfsScanner_.IsCancelled();
                 ntfsValidationFailed = IsNtfsResultSuspiciouslySmall(*result, wideRootPath);
-                usedNtfsMft = !ntfsValidationFailed;
+                usedNtfsMft = !mftScanCancelled && !ntfsValidationFailed;
                 if (usedNtfsMft) {
                     modeText = QStringLiteral("NTFS 极速");
                     modeDetail = QStringLiteral("已读取 NTFS MFT；与磁盘已用空间的差额会归入系统保留/无法访问项");
+                } else if (mftScanCancelled) {
+                    modeText = QStringLiteral("已取消");
+                    modeDetail = QStringLiteral("NTFS 极速扫描已被取消");
                 } else {
                     modeText = QStringLiteral("兼容（校验回退）");
                     modeDetail = QStringLiteral("MFT 结果明显无效，已回退兼容扫描");
@@ -5837,32 +5842,39 @@ void MainWindow::StartScan() {
         }
 
         if (!usedNtfsMft) {
-            if (!ntfsAttempted && modeText == QStringLiteral("兼容")) {
-                modeText = QStringLiteral("兼容");
-                modeDetail = QStringLiteral("未尝试 NTFS MFT，使用兼容扫描");
-            }
-            QMetaObject::invokeMethod(this, [this, rootPath, modeText, modeDetail]() {
-                SetInfoBar(modeText, 0, 0, modeDetail + QStringLiteral(" · ") + rootPath);
-            }, Qt::QueuedConnection);
-            *result = scanner_.Scan(wideRootPath, [this](const core::ScanProgress& progress) {
-                const std::int64_t now = SteadyMilliseconds();
-                std::int64_t previous = lastUiProgressMilliseconds_.load();
-                while (now - previous >= 300) {
-                    if (lastUiProgressMilliseconds_.compare_exchange_weak(previous, now)) {
-                        break;
-                    }
-                }
-                if (now - previous < 300) {
-                    return;
-                }
-                QMetaObject::invokeMethod(this, [this, progress]() {
-                    SetInfoBar(
-                        QStringLiteral("扫描中"),
-                        progress.filesVisited,
-                        progress.directoriesVisited,
-                        ToQString(progress.currentPath));
+            if (mftScanCancelled) {
+                // 取消即停止:不再回退兼容扫描,否则会无视用户的取消、用兼容引擎重新开扫。
+                QMetaObject::invokeMethod(this, [this, rootPath]() {
+                    SetInfoBar(QStringLiteral("已取消"), 0, 0, rootPath);
                 }, Qt::QueuedConnection);
-            });
+            } else {
+                if (!ntfsAttempted && modeText == QStringLiteral("兼容")) {
+                    modeText = QStringLiteral("兼容");
+                    modeDetail = QStringLiteral("未尝试 NTFS MFT，使用兼容扫描");
+                }
+                QMetaObject::invokeMethod(this, [this, rootPath, modeText, modeDetail]() {
+                    SetInfoBar(modeText, 0, 0, modeDetail + QStringLiteral(" · ") + rootPath);
+                }, Qt::QueuedConnection);
+                *result = scanner_.Scan(wideRootPath, [this](const core::ScanProgress& progress) {
+                    const std::int64_t now = SteadyMilliseconds();
+                    std::int64_t previous = lastUiProgressMilliseconds_.load();
+                    while (now - previous >= 300) {
+                        if (lastUiProgressMilliseconds_.compare_exchange_weak(previous, now)) {
+                            break;
+                        }
+                    }
+                    if (now - previous < 300) {
+                        return;
+                    }
+                    QMetaObject::invokeMethod(this, [this, progress]() {
+                        SetInfoBar(
+                            QStringLiteral("扫描中"),
+                            progress.filesVisited,
+                            progress.directoriesVisited,
+                            ToQString(progress.currentPath));
+                    }, Qt::QueuedConnection);
+                });
+            }
         }
 
         AddReservedSpacePlaceholder(*result, wideRootPath);
@@ -5920,6 +5932,7 @@ bool MainWindow::IsRunningAsAdministrator() const {
 
 void MainWindow::StopScan() {
     scanner_.RequestCancel();
+    ntfsScanner_.RequestCancel();
     stopButton_->setEnabled(false);
     SetInfoBar(QStringLiteral("正在停止"), 0, 0, QStringLiteral("等待扫描线程退出"));
 }

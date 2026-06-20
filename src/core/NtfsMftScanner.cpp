@@ -807,7 +807,18 @@ bool NtfsMftScanner::CanScan(const std::wstring& rootPath) const {
     return _wcsicmp(fileSystemName, L"NTFS") == 0;
 }
 
+void NtfsMftScanner::RequestCancel() {
+    cancelled_.store(true);
+}
+
+bool NtfsMftScanner::IsCancelled() const {
+    return cancelled_.load();
+}
+
 ScanResult NtfsMftScanner::Scan(const std::wstring& rootPath) {
+    // 与 DirectoryScanner::Scan 对等:每次扫描开头重置取消标志。
+    cancelled_.store(false);
+
     ScanResult result;
     const std::wstring volumePath = ToVolumePath(rootPath);
     HANDLE volume = CreateFileW(
@@ -850,7 +861,7 @@ ScanResult NtfsMftScanner::Scan(const std::wstring& rootPath) {
             std::uint64_t remainingRunBytes = run.clusterCount * boot.bytesPerCluster;
             std::uint64_t diskOffset = static_cast<std::uint64_t>(run.logicalCluster) * boot.bytesPerCluster;
 
-            while (remainingRunBytes >= boot.fileRecordBytes) {
+            while (remainingRunBytes >= boot.fileRecordBytes && !IsCancellationRequested(&cancelled_)) {
                 const std::uint64_t bytesToRead = std::min<std::uint64_t>(chunk.size(), remainingRunBytes - (remainingRunBytes % boot.fileRecordBytes));
                 if (bytesToRead == 0) {
                     break;
@@ -860,6 +871,10 @@ ScanResult NtfsMftScanner::Scan(const std::wstring& rootPath) {
                 const std::uint64_t recordsInChunk = bytesToRead / boot.fileRecordBytes;
 
                 for (std::uint64_t recordIndex = 0; recordIndex < recordsInChunk; ++recordIndex) {
+                    if ((recordIndex & 0x3FFFULL) == 0 && IsCancellationRequested(&cancelled_)) {
+                        break;
+                    }
+
                     const std::uint8_t* source = chunk.data() + recordIndex * boot.fileRecordBytes;
                     std::memcpy(record.data(), source, boot.fileRecordBytes);
                     if (!ApplyFixup(record, boot.fileRecordBytes, boot.bytesPerSector)) {
