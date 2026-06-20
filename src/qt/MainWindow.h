@@ -257,6 +257,11 @@ private:
     void MovePathToRecycleBin(const QString& path);
 
     /**
+     * @brief 打开首选项对话框:外观主题 + 垃圾清理/去重默认选项,确定即写回并持久化。
+     */
+    void ShowPreferencesDialog();
+
+    /**
      * @brief 向菜单添加通用路径操作。
      * @param menu 目标菜单。
      * @param path 操作路径。

@@ -3206,6 +3206,22 @@ void MainWindow::LoadUiSettings() {
     ApplyStyle();
     UpdateModuleChrome();
 
+    // 清理/去重默认选项持久化(默认与各复选框构造时一致:隐私/开发默认勾选,
+    // 深度清理/永久删除默认不勾——故未设置过的用户行为零变化)。复选框在
+    // CreateWorkspace(构造函数内,先于本函数)已创建,此处可安全恢复。
+    if (cleanupPrivacyCheckBox_ != nullptr) {
+        cleanupPrivacyCheckBox_->setChecked(settings.value(QStringLiteral("cleanup/privacy"), true).toBool());
+    }
+    if (cleanupDeveloperCheckBox_ != nullptr) {
+        cleanupDeveloperCheckBox_->setChecked(settings.value(QStringLiteral("cleanup/developer"), true).toBool());
+    }
+    if (cleanupDeepCleanCheckBox_ != nullptr) {
+        cleanupDeepCleanCheckBox_->setChecked(settings.value(QStringLiteral("cleanup/deepClean"), false).toBool());
+    }
+    if (duplicatePermanentCheckBox_ != nullptr) {
+        duplicatePermanentCheckBox_->setChecked(settings.value(QStringLiteral("dedup/permanentDelete"), false).toBool());
+    }
+
     const QStringList recentPaths = settings.value(QStringLiteral("scan/recentPaths")).toStringList();
     if (driveCombo_ != nullptr) {
         for (const QString& path : recentPaths) {
@@ -3263,6 +3279,12 @@ void MainWindow::SaveUiSettings() const {
         }
         settings.setValue(QStringLiteral("scan/recentPaths"), recentPaths);
     }
+
+    // 清理/去重默认选项(与 LoadUiSettings 对称)。
+    settings.setValue(QStringLiteral("cleanup/privacy"), cleanupPrivacyCheckBox_ != nullptr && cleanupPrivacyCheckBox_->isChecked());
+    settings.setValue(QStringLiteral("cleanup/developer"), cleanupDeveloperCheckBox_ != nullptr && cleanupDeveloperCheckBox_->isChecked());
+    settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
+    settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
 
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
@@ -3560,6 +3582,9 @@ QWidget* MainWindow::CreateApplicationMenu() {
     fileMenu->addSeparator();
     QAction* exportAction = fileMenu->addAction(QStringLiteral("导出当前列表"), this, &MainWindow::ExportCurrentTable);
     exportAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+E")));
+    fileMenu->addSeparator();
+    QAction* prefsAction = fileMenu->addAction(QStringLiteral("首选项..."), this, &MainWindow::ShowPreferencesDialog);
+    prefsAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+,")));
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出"), this, &QWidget::close);
     createMenuButton(QStringLiteral("文件"), fileMenu);
@@ -7016,6 +7041,123 @@ QWidget* MainWindow::CreateHealthTab() {
     layout->addWidget(healthScroll_, 1);
 
     return page;
+}
+
+void MainWindow::ShowPreferencesDialog() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("首选项"));
+    dialog.setWindowIcon(windowIcon());
+    dialog.resize(540, 420);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    auto* tabs = new QTabWidget(&dialog);
+
+    // —— 外观页:主题皮肤(复用 SetTheme,与「工具 · 主题皮肤」菜单同源) ——
+    auto* appearancePage = new QWidget(&dialog);
+    auto* appearanceLayout = new QVBoxLayout(appearancePage);
+    appearanceLayout->setContentsMargins(22, 20, 22, 18);
+    appearanceLayout->setSpacing(10);
+    auto* themeCaption = new QLabel(QStringLiteral("主题皮肤"), appearancePage);
+    themeCaption->setObjectName(QStringLiteral("AboutTitle"));
+    auto* themeCombo = new QComboBox(appearancePage);
+    themeCombo->addItem(QStringLiteral("浅色专业"), QStringLiteral("light"));
+    themeCombo->addItem(QStringLiteral("暗色大师"), QStringLiteral("dark"));
+    themeCombo->addItem(QStringLiteral("蓝色清爽"), QStringLiteral("blue"));
+    themeCombo->setCurrentIndex(qMax(0, themeCombo->findData(currentTheme_)));
+    auto* themeHint = new QLabel(QStringLiteral("切换会立即生效。也可在「工具 · 主题皮肤」菜单快速切换。"), appearancePage);
+    themeHint->setWordWrap(true);
+    appearanceLayout->addWidget(themeCaption);
+    appearanceLayout->addWidget(themeCombo);
+    appearanceLayout->addWidget(themeHint);
+    appearanceLayout->addStretch(1);
+    tabs->addTab(appearancePage, QStringLiteral("外观"));
+
+    // —— 清理页:复用清理 tab 的三个默认开关(确定时写回成员复选框) ——
+    auto* cleanupPage = new QWidget(&dialog);
+    auto* cleanupLayout = new QVBoxLayout(cleanupPage);
+    cleanupLayout->setContentsMargins(22, 20, 22, 18);
+    cleanupLayout->setSpacing(10);
+    auto* cleanupCaption = new QLabel(QStringLiteral("垃圾清理默认选项(影响下次扫描清理与删除方式)"), cleanupPage);
+    cleanupCaption->setWordWrap(true);
+    auto* privacyBox = new QCheckBox(QStringLiteral("扫描隐私痕迹(浏览器 / 最近文档 / 剪贴板等)"), cleanupPage);
+    privacyBox->setChecked(cleanupPrivacyCheckBox_ != nullptr ? cleanupPrivacyCheckBox_->isChecked() : true);
+    auto* developerBox = new QCheckBox(QStringLiteral("扫描开发缓存(npm / pip / NuGet / Gradle / Maven 等)"), cleanupPage);
+    developerBox->setChecked(cleanupDeveloperCheckBox_ != nullptr ? cleanupDeveloperCheckBox_->isChecked() : true);
+    auto* deepCleanBox = new QCheckBox(QStringLiteral("深度清理:删除时不进回收站,直接永久删除"), cleanupPage);
+    deepCleanBox->setChecked(cleanupDeepCleanCheckBox_ != nullptr ? cleanupDeepCleanCheckBox_->isChecked() : false);
+    auto* deepCleanHint = new QLabel(QStringLiteral("提示:永久删除不可恢复,请确认信任所选清理项目。"), cleanupPage);
+    deepCleanHint->setWordWrap(true);
+    cleanupLayout->addWidget(cleanupCaption);
+    cleanupLayout->addWidget(privacyBox);
+    cleanupLayout->addWidget(developerBox);
+    cleanupLayout->addWidget(deepCleanBox);
+    cleanupLayout->addWidget(deepCleanHint);
+    cleanupLayout->addStretch(1);
+    tabs->addTab(cleanupPage, QStringLiteral("清理"));
+
+    // —— 去重页:复用去重 tab 的永久删除开关 ——
+    auto* dedupPage = new QWidget(&dialog);
+    auto* dedupLayout = new QVBoxLayout(dedupPage);
+    dedupLayout->setContentsMargins(22, 20, 22, 18);
+    dedupLayout->setSpacing(10);
+    auto* dedupCaption = new QLabel(QStringLiteral("疑似重复文件处理方式"), dedupPage);
+    dedupCaption->setWordWrap(true);
+    auto* permanentBox = new QCheckBox(QStringLiteral("一键去重时永久删除(不进回收站)"), dedupPage);
+    permanentBox->setChecked(duplicatePermanentCheckBox_ != nullptr ? duplicatePermanentCheckBox_->isChecked() : false);
+    auto* dedupHint = new QLabel(QStringLiteral("未勾选时,删除的重复文件移入回收站,可恢复。"), dedupPage);
+    dedupHint->setWordWrap(true);
+    dedupLayout->addWidget(dedupCaption);
+    dedupLayout->addWidget(permanentBox);
+    dedupLayout->addWidget(dedupHint);
+    dedupLayout->addStretch(1);
+    tabs->addTab(dedupPage, QStringLiteral("去重"));
+
+    layout->addWidget(tabs, 1);
+
+    auto* buttons = new QDialogButtonBox(&dialog);
+    QPushButton* okButton = buttons->addButton(QStringLiteral("确定"), QDialogButtonBox::AcceptRole);
+    buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
+    okButton->setDefault(true);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    ApplyNativeWindowIcon(&dialog);
+    QTimer::singleShot(0, &dialog, [&dialog]() { ApplyNativeWindowIcon(&dialog); });
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    // 应用:主题立即切换,四个开关写回成员复选框(既有扫描/删除消费路径自动生效)。
+    const QString chosenTheme = themeCombo->currentData().toString();
+    if (!chosenTheme.isEmpty() && chosenTheme != currentTheme_) {
+        SetTheme(chosenTheme);
+    }
+    if (cleanupPrivacyCheckBox_ != nullptr) {
+        cleanupPrivacyCheckBox_->setChecked(privacyBox->isChecked());
+    }
+    if (cleanupDeveloperCheckBox_ != nullptr) {
+        cleanupDeveloperCheckBox_->setChecked(developerBox->isChecked());
+    }
+    if (cleanupDeepCleanCheckBox_ != nullptr) {
+        cleanupDeepCleanCheckBox_->setChecked(deepCleanBox->isChecked());
+    }
+    if (duplicatePermanentCheckBox_ != nullptr) {
+        duplicatePermanentCheckBox_->setChecked(permanentBox->isChecked());
+    }
+
+    // 立即落盘四个开关(主题经 SetTheme 已更新 currentTheme_,会在关闭窗口时随 ui/theme 持久化)。
+    {
+        QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
+        settings.setValue(QStringLiteral("cleanup/privacy"), cleanupPrivacyCheckBox_ != nullptr && cleanupPrivacyCheckBox_->isChecked());
+        settings.setValue(QStringLiteral("cleanup/developer"), cleanupDeveloperCheckBox_ != nullptr && cleanupDeveloperCheckBox_->isChecked());
+        settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
+        settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
+    }
+    SetInfoBar(QStringLiteral("已保存首选项"), 0, 0, QStringLiteral("设置将在下次扫描清理 / 去重时生效"));
 }
 
 void MainWindow::ShowHealthDetailDialog(int row) {
