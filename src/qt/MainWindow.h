@@ -27,6 +27,7 @@ class QDateEdit;
 class QCheckBox;
 class QCloseEvent;
 class QEvent;
+class QFileSystemWatcher;
 class QFrame;
 class QIcon;
 class QScrollArea;
@@ -128,6 +129,32 @@ private slots:
      * @brief 比较刚完成的扫描与该路径上次扫描的持久化基线,显著增长时显示告警横幅,并把当前结果写为新基线。
      */
     void EvaluateGrowthAlert();
+
+    /**
+     * @brief 实时监控的单一幂等仲裁器:据开关/模块页/扫描状态/latestResult_ 决定 arm 或 disarm watcher。
+     *        所有转换点(扫完/切模块/开关/启动恢复缓存)统一调用;scanning_ 为真时早返回不碰路径。
+     */
+    void ReevaluateWatcher();
+    /**
+     * @brief directoryChanged 入口:启动防抖计时器(聚合一波变化)。
+     */
+    void ScheduleWatcherRescan();
+    /**
+     * @brief 防抖到期:在各前置条件满足且未冷却时触发 RescanPath 重扫;扫描中或冷却中则重排定时器。
+     */
+    void OnWatchDebounceTimeout();
+    /**
+     * @brief 计算应监视的路径列表:根 + 一级子目录(裸盘根返回空以避免全盘重扫循环)。
+     */
+    QStringList ComputeWatchPaths() const;
+    /**
+     * @brief 移除 watcher 当前所有路径(不清 watchedRootPath_,由调用方决定)。
+     */
+    void DisarmWatcher();
+    /**
+     * @brief 当前是否处于磁盘分析模块页(精确复刻 UpdateModuleChrome 的 isDiskAnalysisPage 判定)。
+     */
+    bool IsOnDiskAnalysisPage() const;
 
 private:
     /**
@@ -1142,6 +1169,35 @@ private:
      * @brief 快速搜索防抖计时器。
      */
     QTimer* searchDebounceTimer_ = nullptr;
+
+    /**
+     * @brief 实时文件夹监控(E2):监视已扫描根及其一级子目录,变化经防抖触发自动重扫。默认关闭(liveWatchEnabled_)。
+     */
+    QFileSystemWatcher* folderWatcher_ = nullptr;
+    /**
+     * @brief 实时监控的防抖计时器(聚合一波 directoryChanged 后再重扫),单次触发 500ms。
+     */
+    QTimer* watchDebounceTimer_ = nullptr;
+    /**
+     * @brief 是否启用实时文件夹监控(QSettings 键 watch/liveEnabled,默认 false)。
+     */
+    bool liveWatchEnabled_ = false;
+    /**
+     * @brief 当前 watcher 已 arm 的根路径(归一为原生分隔符、去尾分隔符,与 driveCombo 对齐)。
+     */
+    QString watchedRootPath_;
+    /**
+     * @brief 当前 watcher 实际监视的路径列表(幂等 swap 检测)。
+     */
+    QStringList currentWatchPaths_;
+    /**
+     * @brief 上一次 watcher 触发重扫的时刻(epoch ms),节流用。
+     */
+    qint64 lastWatcherRescanMsec_ = 0;
+    /**
+     * @brief watcher 重扫冷却上限(epoch ms);防外部搅动导致的稳态重扫循环。
+     */
+    qint64 watcherCooldownUntilMsec_ = 0;
 
     /**
      * @brief 快速搜索结果表格。

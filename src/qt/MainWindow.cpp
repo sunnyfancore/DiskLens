@@ -28,6 +28,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
 #include <QFont>
 #include <QFontMetrics>
 #include <QFrame>
@@ -1927,6 +1928,16 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     searchDebounceTimer_->setInterval(180);
     busyAnimationTimer_ = new QTimer(this);
     busyAnimationTimer_->setInterval(120);
+
+    // E2 实时文件夹监控:监视已扫描根及一级子目录,变化经防抖触发自动重扫。
+    // folderWatcher_ 父对象为 this,随主窗口析构自动销毁;directoryChanged 经事件循环投递到 UI 线程。
+    folderWatcher_ = new QFileSystemWatcher(this);
+    connect(folderWatcher_, &QFileSystemWatcher::directoryChanged, this, &MainWindow::ScheduleWatcherRescan);
+    watchDebounceTimer_ = new QTimer(this);
+    watchDebounceTimer_->setSingleShot(true);
+    watchDebounceTimer_->setInterval(500);
+    connect(watchDebounceTimer_, &QTimer::timeout, this, &MainWindow::OnWatchDebounceTimeout);
+
     InstallShortcuts();
 
     directoryTree_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2257,6 +2268,7 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    DisarmWatcher();  // E2:关闭时先拆 watcher,防御性(父对象析构本也会销毁)。
     SaveUiSettings();
     QMainWindow::closeEvent(event);
 }
@@ -3180,6 +3192,9 @@ void MainWindow::LoadLastScanCacheAsync() {
                 latestResult_ ? latestResult_->fileCount : 0,
                 latestResult_ ? latestResult_->directoryCount : 0,
                 lastScanModeDetail_);
+            // E2:恢复缓存结果非新扫描,无耗时基线;给 30s 冷却避免恢复后外部搅动立刻触发重扫。
+            watcherCooldownUntilMsec_ = QDateTime::currentMSecsSinceEpoch() + 30000;
+            ReevaluateWatcher();  // E2:启动恢复缓存后,若已启用则按该根 arm watcher。
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -3240,6 +3255,9 @@ void MainWindow::LoadUiSettings() {
     if (duplicatePermanentCheckBox_ != nullptr) {
         duplicatePermanentCheckBox_->setChecked(settings.value(QStringLiteral("dedup/permanentDelete"), false).toBool());
     }
+
+    // E2:实时文件夹监控开关,默认关闭(未设置过的用户行为零变化)。
+    liveWatchEnabled_ = settings.value(QStringLiteral("watch/liveEnabled"), false).toBool();
 
     const QStringList recentPaths = settings.value(QStringLiteral("scan/recentPaths")).toStringList();
     if (driveCombo_ != nullptr) {
@@ -3304,6 +3322,9 @@ void MainWindow::SaveUiSettings() const {
     settings.setValue(QStringLiteral("cleanup/developer"), cleanupDeveloperCheckBox_ != nullptr && cleanupDeveloperCheckBox_->isChecked());
     settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
     settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
+
+    // E2 实时文件夹监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
+    settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
 
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
@@ -4807,6 +4828,124 @@ void MainWindow::UpdateModuleChrome() {
     if (workspaceSplitter_ != nullptr) {
         workspaceSplitter_->setSizes(isDiskAnalysisPage ? QList<int>{280, 905, 170} : QList<int>{0, 1055, 0});
     }
+
+    ReevaluateWatcher();
+}
+
+bool MainWindow::IsOnDiskAnalysisPage() const {
+    if (tabs_ == nullptr) {
+        return false;
+    }
+    // 精确复刻 UpdateModuleChrome 的 isDiskAnalysisPage 判定,二者须同步。
+    QWidget* currentPage = tabs_->currentWidget();
+    return currentPage == directoryView_ ||
+           currentPage == largeFilesView_ ||
+           currentPage == staleFilesView_ ||
+           currentPage == typeStatsPage_ ||
+           currentPage == duplicatePage_ ||
+           currentPage == ageHistogramWidget_;
+}
+
+QStringList MainWindow::ComputeWatchPaths() const {
+    if (latestResult_ == nullptr || latestResult_->root == nullptr) {
+        return {};
+    }
+    // 归一为原生分隔符并去尾分隔符(保留裸盘根如 C:\),与 driveCombo 文本对齐。
+    QString root = QDir::toNativeSeparators(ToQString(latestResult_->root->path));
+    while (root.length() > 3 && root.endsWith(QLatin1Char('\\'))) {
+        root.chop(1);
+    }
+    // 裸盘根(形如 C:\、D:\)不监视:监视它及其顶层目录会让盘中任意写入都触发
+    // 全盘 MFT 重扫,形成稳态死循环。这是路线图"根+顶层子目录"的必要安全收敛。
+    if (root.length() == 3 && root.at(0).isLetter() && root.at(1) == QLatin1Char(':') && root.at(2) == QLatin1Char('\\')) {
+        return {};
+    }
+    QStringList paths;
+    paths << root;
+    for (const auto& child : latestResult_->root->children) {
+        if (child && child->kind == core::NodeKind::Directory) {
+            QString childPath = QDir::toNativeSeparators(ToQString(child->path));
+            while (childPath.length() > 3 && childPath.endsWith(QLatin1Char('\\'))) {
+                childPath.chop(1);
+            }
+            if (!childPath.isEmpty() && !paths.contains(childPath)) {
+                paths << childPath;
+            }
+        }
+    }
+    return paths;
+}
+
+void MainWindow::DisarmWatcher() {
+    if (folderWatcher_ != nullptr) {
+        const QStringList watched = folderWatcher_->directories();
+        if (!watched.isEmpty()) {
+            folderWatcher_->removePaths(watched);
+        }
+    }
+    currentWatchPaths_.clear();
+}
+
+void MainWindow::ReevaluateWatcher() {
+    if (folderWatcher_ == nullptr) {
+        return;
+    }
+    // 扫描进行中绝不改动 watcher 路径(硬约束);扫完由 HandleScanFinished 再次调用重新 arm。
+    if (scanning_.load()) {
+        return;
+    }
+    const bool shouldWatch = liveWatchEnabled_ &&
+                             IsOnDiskAnalysisPage() &&
+                             latestResult_ != nullptr &&
+                             latestResult_->root != nullptr;
+    if (!shouldWatch) {
+        DisarmWatcher();
+        watchedRootPath_.clear();
+        return;
+    }
+    const QStringList desired = ComputeWatchPaths();
+    if (currentWatchPaths_ == desired) {
+        return;  // 幂等:目标状态未变(含同为空)则不动 watcher。
+    }
+    DisarmWatcher();
+    if (!desired.isEmpty()) {
+        folderWatcher_->addPaths(desired);  // 不可监视的路径(网络/无权限)会被 Qt 静默跳过,尽力而为。
+    }
+    currentWatchPaths_ = desired;
+    watchedRootPath_ = desired.isEmpty() ? QString() : desired.first();
+}
+
+void MainWindow::ScheduleWatcherRescan() {
+    if (watchDebounceTimer_ != nullptr) {
+        watchDebounceTimer_->start();  // 单次定时器:重复 start() 重置间隔,自然聚合一波 directoryChanged。
+    }
+}
+
+void MainWindow::OnWatchDebounceTimeout() {
+    if (!liveWatchEnabled_) {
+        return;
+    }
+    if (!IsOnDiskAnalysisPage()) {
+        return;
+    }
+    if (watchedRootPath_.isEmpty()) {
+        return;
+    }
+    // 扫描进行中:排队到本次扫完(scanning_ 由完成 lambda 在 UI 线程清零,届时定时器重试)。
+    if (scanning_.load()) {
+        watchDebounceTimer_->start();
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 冷却:防外部搅动(AV/OneDrive/索引器)导致的稳态重扫循环,窗口=max(30s, 2×上次扫描耗时)。
+    if (now < watcherCooldownUntilMsec_) {
+        const qint64 remaining = watcherCooldownUntilMsec_ - now;
+        // 上限放宽到 1h:长冷却(如 10 分钟扫描→20 分钟冷却)下,旧 60s 上限会让防抖定时器每分钟空转唤醒;1h 上限使唤醒次数大幅减少。
+        watchDebounceTimer_->start(static_cast<int>(qBound(qint64(200), remaining, qint64(3600000))));
+        return;
+    }
+    lastWatcherRescanMsec_ = now;
+    RescanPath(watchedRootPath_);
 }
 
 /**
@@ -5352,6 +5491,12 @@ void MainWindow::ApplyStyle() {
         QTabWidget::pane {
             border: none;
             background: transparent;
+        }
+        /* 首选项标签页:纯 QWidget 子页默认不刷背景,显式刷 @windowBg 与对话框底色一致,
+           消除深/蓝主题下可能的灰色拼接缝(等同对话框底色,无拼接缝时为空操作)。 */
+        QWidget#PrefPage {
+            background: @windowBg;
+            border: none;
         }
         QTabBar {
             background: transparent;
@@ -5928,6 +6073,9 @@ void MainWindow::StartScan() {
         driveCombo_->setCurrentIndex(0);
     }
 
+    // E2:扫描期间结构性保证 watcher 无路径(扫完由 HandleScanFinished→ReevaluateWatcher 重新 arm)。
+    DisarmWatcher();
+
     scanStartedAt_ = std::chrono::steady_clock::now();
     lastUiProgressMilliseconds_.store(SteadyMilliseconds());
     const bool elevatedForScan = IsRunningAsAdministrator();
@@ -6179,6 +6327,15 @@ void MainWindow::HandleScanFinished() {
             lastScanModeDetail_.isEmpty() ? (latestResult_->root ? ToQString(latestResult_->root->path) : QString()) : lastScanModeDetail_);
         EvaluateGrowthAlert();
     }
+
+    // E2:按本次扫描耗时刷新 watcher 重扫冷却窗口(防外部搅动导致的稳态重扫循环),再按新根重新 arm。
+    {
+        const qint64 scanMs = static_cast<qint64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - scanStartedAt_).count());
+        const qint64 clampedScanMs = qBound(qint64(0), scanMs, qint64(3600000));
+        watcherCooldownUntilMsec_ = QDateTime::currentMSecsSinceEpoch() + qMax(qint64(30000), clampedScanMs * 2);
+    }
+    ReevaluateWatcher();
 }
 
 void MainWindow::EvaluateGrowthAlert() {
@@ -7283,6 +7440,8 @@ void MainWindow::ShowPreferencesDialog() {
 
     // —— 外观页:主题皮肤(复用 SetTheme,与「工具 · 主题皮肤」菜单同源) ——
     auto* appearancePage = new QWidget(&dialog);
+    appearancePage->setObjectName(QStringLiteral("PrefPage"));
+    appearancePage->setAttribute(Qt::WA_StyledBackground, true);
     auto* appearanceLayout = new QVBoxLayout(appearancePage);
     appearanceLayout->setContentsMargins(22, 20, 22, 18);
     appearanceLayout->setSpacing(10);
@@ -7295,6 +7454,7 @@ void MainWindow::ShowPreferencesDialog() {
     themeCombo->setCurrentIndex(qMax(0, themeCombo->findData(currentTheme_)));
     auto* themeHint = new QLabel(QStringLiteral("切换会立即生效。也可在「工具 · 主题皮肤」菜单快速切换。"), appearancePage);
     themeHint->setWordWrap(true);
+    themeHint->setObjectName(QStringLiteral("EmptyStateHint"));
     appearanceLayout->addWidget(themeCaption);
     appearanceLayout->addWidget(themeCombo);
     appearanceLayout->addWidget(themeHint);
@@ -7303,11 +7463,14 @@ void MainWindow::ShowPreferencesDialog() {
 
     // —— 清理页:复用清理 tab 的三个默认开关(确定时写回成员复选框) ——
     auto* cleanupPage = new QWidget(&dialog);
+    cleanupPage->setObjectName(QStringLiteral("PrefPage"));
+    cleanupPage->setAttribute(Qt::WA_StyledBackground, true);
     auto* cleanupLayout = new QVBoxLayout(cleanupPage);
     cleanupLayout->setContentsMargins(22, 20, 22, 18);
     cleanupLayout->setSpacing(10);
     auto* cleanupCaption = new QLabel(QStringLiteral("垃圾清理默认选项(影响下次扫描清理与删除方式)"), cleanupPage);
     cleanupCaption->setWordWrap(true);
+    cleanupCaption->setObjectName(QStringLiteral("AboutTitle"));
     auto* privacyBox = new QCheckBox(QStringLiteral("扫描隐私痕迹(浏览器 / 最近文档 / 剪贴板等)"), cleanupPage);
     privacyBox->setChecked(cleanupPrivacyCheckBox_ != nullptr ? cleanupPrivacyCheckBox_->isChecked() : true);
     auto* developerBox = new QCheckBox(QStringLiteral("扫描开发缓存(npm / pip / NuGet / Gradle / Maven 等)"), cleanupPage);
@@ -7316,6 +7479,7 @@ void MainWindow::ShowPreferencesDialog() {
     deepCleanBox->setChecked(cleanupDeepCleanCheckBox_ != nullptr ? cleanupDeepCleanCheckBox_->isChecked() : false);
     auto* deepCleanHint = new QLabel(QStringLiteral("提示:永久删除不可恢复,请确认信任所选清理项目。"), cleanupPage);
     deepCleanHint->setWordWrap(true);
+    deepCleanHint->setObjectName(QStringLiteral("EmptyStateHint"));
     cleanupLayout->addWidget(cleanupCaption);
     cleanupLayout->addWidget(privacyBox);
     cleanupLayout->addWidget(developerBox);
@@ -7326,20 +7490,45 @@ void MainWindow::ShowPreferencesDialog() {
 
     // —— 去重页:复用去重 tab 的永久删除开关 ——
     auto* dedupPage = new QWidget(&dialog);
+    dedupPage->setObjectName(QStringLiteral("PrefPage"));
+    dedupPage->setAttribute(Qt::WA_StyledBackground, true);
     auto* dedupLayout = new QVBoxLayout(dedupPage);
     dedupLayout->setContentsMargins(22, 20, 22, 18);
     dedupLayout->setSpacing(10);
     auto* dedupCaption = new QLabel(QStringLiteral("疑似重复文件处理方式"), dedupPage);
     dedupCaption->setWordWrap(true);
+    dedupCaption->setObjectName(QStringLiteral("AboutTitle"));
     auto* permanentBox = new QCheckBox(QStringLiteral("一键去重时永久删除(不进回收站)"), dedupPage);
     permanentBox->setChecked(duplicatePermanentCheckBox_ != nullptr ? duplicatePermanentCheckBox_->isChecked() : false);
     auto* dedupHint = new QLabel(QStringLiteral("未勾选时,删除的重复文件移入回收站,可恢复。"), dedupPage);
     dedupHint->setWordWrap(true);
+    dedupHint->setObjectName(QStringLiteral("EmptyStateHint"));
     dedupLayout->addWidget(dedupCaption);
     dedupLayout->addWidget(permanentBox);
     dedupLayout->addWidget(dedupHint);
     dedupLayout->addStretch(1);
     tabs->addTab(dedupPage, QStringLiteral("去重"));
+
+    // —— 实时监控页:E2 文件夹实时监控开关(默认关闭,纯本地,无后台线程/网络) ——
+    auto* autoPage = new QWidget(&dialog);
+    autoPage->setObjectName(QStringLiteral("PrefPage"));
+    autoPage->setAttribute(Qt::WA_StyledBackground, true);
+    auto* autoLayout = new QVBoxLayout(autoPage);
+    autoLayout->setContentsMargins(22, 20, 22, 18);
+    autoLayout->setSpacing(10);
+    auto* autoCaption = new QLabel(QStringLiteral("文件夹实时监控（扫描完成后监视该位置，变化即自动重扫）"), autoPage);
+    autoCaption->setWordWrap(true);
+    autoCaption->setObjectName(QStringLiteral("AboutTitle"));
+    auto* liveWatchBox = new QCheckBox(QStringLiteral("启用文件夹实时监控（变化后自动重扫，默认关闭）"), autoPage);
+    liveWatchBox->setChecked(liveWatchEnabled_);
+    auto* liveWatchHint = new QLabel(QStringLiteral("仅监控扫描根目录及其一级子目录；裸盘根目录（如 C:\\）不启用，以避免频繁全盘重扫；网络路径 / 深路径为尽力而为（Qt 已知局限）。"), autoPage);
+    liveWatchHint->setWordWrap(true);
+    liveWatchHint->setObjectName(QStringLiteral("EmptyStateHint"));
+    autoLayout->addWidget(autoCaption);
+    autoLayout->addWidget(liveWatchBox);
+    autoLayout->addWidget(liveWatchHint);
+    autoLayout->addStretch(1);
+    tabs->addTab(autoPage, QStringLiteral("实时监控"));
 
     layout->addWidget(tabs, 1);
 
@@ -7347,8 +7536,17 @@ void MainWindow::ShowPreferencesDialog() {
     QPushButton* okButton = buttons->addButton(QStringLiteral("确定"), QDialogButtonBox::AcceptRole);
     buttons->addButton(QStringLiteral("取消"), QDialogButtonBox::RejectRole);
     okButton->setDefault(true);
+    okButton->setObjectName(QStringLiteral("PrimaryButton"));
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    // 按钮行单独内边距(20,0,20,16):标签页保持贴顶强调线观感,确定/取消右下留白,
+    // 与 CopyPath/HealthDetail(20,18,20,16)等同级对话框尺度一致(本对话框为标签式,顶部由标签栏处理)。
+    auto* buttonRow = new QHBoxLayout();
+    buttonRow->setContentsMargins(20, 0, 20, 16);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(buttons);
+    layout->addLayout(buttonRow);
 
     ApplyNativeWindowIcon(&dialog);
     QTimer::singleShot(0, &dialog, [&dialog]() { ApplyNativeWindowIcon(&dialog); });
@@ -7375,14 +7573,19 @@ void MainWindow::ShowPreferencesDialog() {
         duplicatePermanentCheckBox_->setChecked(permanentBox->isChecked());
     }
 
-    // 立即落盘四个开关(主题经 SetTheme 已更新 currentTheme_,会在关闭窗口时随 ui/theme 持久化)。
+    // 实时监控开关写回成员(E2),立即生效。
+    liveWatchEnabled_ = liveWatchBox->isChecked();
+
+    // 立即落盘各开关(主题经 SetTheme 已更新 currentTheme_,会在关闭窗口时随 ui/theme 持久化)。
     {
         QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
         settings.setValue(QStringLiteral("cleanup/privacy"), cleanupPrivacyCheckBox_ != nullptr && cleanupPrivacyCheckBox_->isChecked());
         settings.setValue(QStringLiteral("cleanup/developer"), cleanupDeveloperCheckBox_ != nullptr && cleanupDeveloperCheckBox_->isChecked());
         settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
         settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
+        settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
     }
+    ReevaluateWatcher();
     SetInfoBar(QStringLiteral("已保存首选项"), 0, 0, QStringLiteral("设置将在下次扫描清理 / 去重时生效"));
 }
 
