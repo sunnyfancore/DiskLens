@@ -180,14 +180,25 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
         }
         return static_cast<long long>(value);
     };
-    // NVMe SMART/Health Log Page(Log ID 02h)布局(对照 NVMe 1.4/2.0 规范):
-    //   byte 72-87  Controller Busy Time(分钟)
-    //   byte 88-103 Power Cycles           ← 通电次数
-    //   byte 104-119 Power On Hours        ← 通电时长(小时)
-    // 旧代码误读 72/80(都落在 Controller Busy Time 区),导致通电次数=忙时分钟数、
-    // 通电时长≈0。改为 88/104。
-    info.powerCycleCount = readU128(88);
-    info.powerOnHours = readU128(104);
+    // NVMe SMART/Health Log Page(Log ID 02h)布局——逐字段对照 Windows SDK nvme.h 的
+    // NVME_HEALTH_INFO_LOG 结构体累加(所有计数器为 16 字节小端 uint128,读低 8 字节足够):
+    //   byte 0       Critical Warning
+    //   byte 1-2     Composite Temperature(K 小端)
+    //   byte 3       Available Spare          byte 4   Available Spare Threshold
+    //   byte 5       Percentage Used          byte 6-31 Reserved0[26]  ← 26 字节保留间隙
+    //   byte 32-47   Data Units Read          byte 48-63  Data Units Written
+    //   byte 64-79   Host Read Commands       byte 80-95  Host Write Commands
+    //   byte 96-111  Controller Busy Time(分钟)
+    //   byte 112-127 Power Cycles             ← 通电次数
+    //   byte 128-143 Power On Hours           ← 通电时长(小时)
+    //   byte 144-159 Unsafe Shutdowns         byte 160-175 Media Errors
+    //   byte 176-191 Number of Error Info Log Entries
+    // 偏移曾两次写错:先 72/80(落 Host Read/Write Commands)、后 88/104(落 Host Write
+    // Commands / Controller Busy Time)——idle 探测下都读到 ~0,与"温度/寿命读对、通电读 0"
+    // 的现象吻合。根因是 byte6-31 的 26 字节保留间隙被当成 2 字节,整段计数器错位 24 字节。
+    // 正确为 Power Cycles=112、Power On Hours=128(已逐字段核对 nvme.h)。
+    info.powerCycleCount = readU128(112);
+    info.powerOnHours = readU128(128);
 
     // 状态:NVMe SMART/Health Log(Log ID 02h)byte0 Critical Warning 共 5 个有效位,
     // 对照 NVMe 1.4/2.0 规范与 Microsoft NVME_HEALTH_INFO_LOG 文档:
@@ -211,6 +222,7 @@ void QueryNvmeHealth(HANDLE handle, DiskHealthInfo& info) {
     } else {
         info.status = DiskHealthStatus::Good;
     }
+
     info.note = L"NVMe 健康日志";
 }
 
