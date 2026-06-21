@@ -3,6 +3,7 @@
 #include "app/resource.h"
 #include "core/CategoryStats.h"
 #include "core/AgeStats.h"
+#include "core/ScanDiff.h"
 #include "core/Format.h"
 #include "core/LongPath.h"
 #include "qt/AppIcons.h"
@@ -3902,6 +3903,9 @@ QWidget* MainWindow::CreateApplicationMenu() {
     rescanAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
     QAction* parentAction = toolsMenu->addAction(QStringLiteral("返回上级目录"), this, &MainWindow::GoToParentDirectory);
     parentAction->setShortcut(QKeySequence(Qt::Key_Backspace));
+    toolsMenu->addAction(QStringLiteral("扫描对比…"), this, [this]() {
+        ShowScanDiffDialog();  // D2:与上次同根扫描对比(新增/消失/增长/缩减)。
+    });
     toolsMenu->addSeparator();
     QMenu* themeMenu = toolsMenu->addMenu(QStringLiteral("主题皮肤"));
     themeMenu->addAction(QStringLiteral("浅色专业"), this, [this]() {
@@ -6548,8 +6552,84 @@ void MainWindow::StartScan() {
         }
 
         AddReservedSpacePlaceholder(*result, wideRootPath);
+        // D2 取消守卫:被 RequestCancel() 取消的扫描返回的是「部分结果」树,若拍平后当作下次对比的基线,
+        // 会让本次未扫到的文件全部被误报为「新增」、净变化严重失真。故取消时跳过对比且不更新基线。
+        // 注意:仅当兼容扫描本轮确实执行过才询 scanner_.IsCancelled()——它在 Scan() 开头复位,
+        // 走 NTFS MFT 路径时本不会调用 scanner_.Scan(),此时其状态是上一次扫描遗留的过期值。
+        bool scanWasCancelled = mftScanCancelled;
+        if (!usedNtfsMft && !mftScanCancelled) {
+            scanWasCancelled = scanner_.IsCancelled();
+        }
+        // D2:在后台扫描线程上把结果树拍平为快照(树遍历可能耗时,避免占 UI 线程);经 shared_ptr
+        // 廉价拷贝进事件队列,UI 线程只做 map diff(耗时远低于树遍历)。
+        std::shared_ptr<core::FlatSnapshot> newSnapshot =
+            std::make_shared<core::FlatSnapshot>(core::BuildFlatSnapshot(*result));
         auto* rawResult = result.release();
-        QMetaObject::invokeMethod(this, [this, rawResult, usedNtfsMft, modeText, modeDetail]() {
+        QMetaObject::invokeMethod(this, [this, rawResult, newSnapshot, usedNtfsMft, modeText, modeDetail, scanWasCancelled]() {
+            // D2:取消 / 快照过大 / 无基线 / 换根 都跳过 ComputeScanDiff;仅「同根+有基线+规模可承受」才对比。
+            latestDiffSkipReason_.clear();
+            const bool sameRootAndHasBaseline = !scanWasCancelled
+                && newSnapshot != nullptr
+                && lastScanSnapshot_ != nullptr
+                && !lastScanSnapshot_->files.empty()
+                && core::SameScanRoot(*lastScanSnapshot_, *newSnapshot);
+            if (scanWasCancelled) {
+                // 取消产生的部分树不入基线(防污染),但部分结果仍正常展示与缓存。
+                latestDiffAvailable_ = false;
+                latestDiffEntries_.clear();
+                latestDiffTruncated_ = false;
+                latestDiffRootPath_.clear();
+                latestDiffSummary_.clear();
+                latestDiffSkipReason_ = QStringLiteral(
+                    "上次扫描被取消(只读到了部分结果),已跳过对比基线更新。\n"
+                    "请对同一目录正常完成一次扫描,即可恢复「上次 → 本次」对比。");
+            } else if (sameRootAndHasBaseline) {
+                // 快照规模上限:合并条目过多时跳过 UI 线程上的 diff + 排序,避免界面卡顿
+                // (maxEntries 仅裁剪排序后的输出,不约束排序本身的耗时)。
+                constexpr std::size_t kDiffSnapshotCeiling = 1000000;
+                const std::size_t combinedSnapshotSize =
+                    lastScanSnapshot_->files.size() + newSnapshot->files.size();
+                if (combinedSnapshotSize > kDiffSnapshotCeiling) {
+                    latestDiffAvailable_ = false;
+                    latestDiffEntries_.clear();
+                    latestDiffTruncated_ = false;
+                    latestDiffRootPath_ = ToQString(newSnapshot->rootPath);
+                    latestDiffSummary_.clear();
+                    latestDiffSkipReason_ = QStringLiteral(
+                        "本次与上次扫描的文件数过多(合计 %1 项),为避免界面卡顿已跳过对比。\n"
+                        "扫描结果本身完整可用,仅「扫描对比」暂不展示。")
+                        .arg(static_cast<qulonglong>(combinedSnapshotSize));
+                } else {
+                    const core::ScanDiffResult diffResult =
+                        core::ComputeScanDiff(*lastScanSnapshot_, *newSnapshot);
+                    latestDiffAvailable_ = true;
+                    latestDiffEntries_ = std::move(diffResult.entries);
+                    latestDiffTruncated_ = diffResult.truncated;
+                    latestDiffRootPath_ = ToQString(newSnapshot->rootPath);
+                    // 净变化带正负号;正=整体增长。
+                    const QString sign = diffResult.netDelta >= 0 ? QStringLiteral("+") : QStringLiteral("−");
+                    const qint64 absNet = diffResult.netDelta >= 0 ? diffResult.netDelta : -diffResult.netDelta;
+                    latestDiffSummary_ = QStringLiteral("新增 %1 · 消失 %2 · 增长 %3 · 缩减 %4 · 净变化 %5%6")
+                                             .arg(static_cast<qulonglong>(diffResult.newCount))
+                                             .arg(static_cast<qulonglong>(diffResult.goneCount))
+                                             .arg(static_cast<qulonglong>(diffResult.growthCount))
+                                             .arg(static_cast<qulonglong>(diffResult.shrinkCount))
+                                             .arg(sign)
+                                             .arg(ToQString(core::FormatBytes(static_cast<std::uint64_t>(absNet))));
+                }
+            } else {
+                // 首次扫描 / 换根 / 无基线:无可用对比,清空展示态(本次快照仍保留为下次基线)。
+                latestDiffAvailable_ = false;
+                latestDiffEntries_.clear();
+                latestDiffTruncated_ = false;
+                latestDiffRootPath_.clear();
+                latestDiffSummary_.clear();
+            }
+            // 基线更新:取消时不更新(防部分结果污染);其余情形(含快照过大跳过)本次完整快照成为下次基线。
+            if (!scanWasCancelled) {
+                lastScanSnapshot_ = newSnapshot;
+            }
+
             latestResult_.reset(rawResult);
             lastScanUsedNtfsMft_ = usedNtfsMft;
             lastScanModeText_ = modeText;
@@ -8143,6 +8223,172 @@ void MainWindow::ShowFilePreview(const QString& path) {
             }
         }
         layout->addWidget(view, 1);
+    }
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto* buttonRow = new QHBoxLayout();
+    buttonRow->setContentsMargins(16, 8, 16, 12);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(buttons);
+    layout->addLayout(buttonRow);
+
+    ApplyNativeWindowIcon(&dialog);
+    QTimer::singleShot(0, &dialog, [&dialog]() { ApplyNativeWindowIcon(&dialog); });
+    dialog.exec();
+}
+
+void MainWindow::ShowScanDiffDialog() {
+    // D2:扫描对比(会话内)。无基线/换根 → 空态说明;有对比但无变化 → 说明;否则摘要 + 差异表。
+    // 条目已在 core 按 |delta| 降序,不启用交互排序(数字列会被按文本误排)。
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("扫描对比 · 上次 → 本次"));
+    dialog.setWindowIcon(windowIcon());
+    dialog.resize(820, 560);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    // 顶部根路径条(可选中复制)。
+    auto* rootLabel = new QLabel(
+        latestDiffAvailable_
+            ? QStringLiteral("对比根目录:%1").arg(latestDiffRootPath_)
+            : QStringLiteral("对比根目录:—"),
+        &dialog);
+    rootLabel->setObjectName(QStringLiteral("EmptyStateHint"));
+    rootLabel->setWordWrap(true);
+    rootLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    rootLabel->setContentsMargins(16, 10, 16, 8);
+    layout->addWidget(rootLabel);
+
+    if (!latestDiffSkipReason_.isEmpty()) {
+        // 跳过对比(扫描被取消 / 快照过大):显示具体原因,而非「无基线」误导。
+        auto* empty = new QLabel(latestDiffSkipReason_, &dialog);
+        empty->setObjectName(QStringLiteral("EmptyStateHint"));
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setWordWrap(true);
+        layout->addWidget(empty, 1);
+    } else if (!latestDiffAvailable_) {
+        // 无可比基线(首次扫描 / 换根)。
+        auto* empty = new QLabel(&dialog);
+        empty->setObjectName(QStringLiteral("EmptyStateHint"));
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setWordWrap(true);
+        empty->setText(QStringLiteral(
+            "尚无可对比的上次扫描结果。\n\n请对同一目录至少扫描两次(仅对比 ≥ 1 MiB 的文件)。"
+            "首次扫描只建立基线,从第二次起可查看「上次 → 本次」的变化。"));
+        layout->addWidget(empty, 1);
+    } else if (latestDiffEntries_.empty()) {
+        // 有基线且同根,但无 ≥1 MiB 的变化。
+        auto* empty = new QLabel(&dialog);
+        empty->setObjectName(QStringLiteral("EmptyStateHint"));
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setWordWrap(true);
+        empty->setText(QStringLiteral(
+            "上次扫描与本次之间没有可报告的变化(≥ 1 MiB 的文件未增删、未明显增减)。"));
+        layout->addWidget(empty, 1);
+    } else {
+        // 摘要条(计数 + 净变化)。
+        auto* summary = new QLabel(latestDiffSummary_, &dialog);
+        summary->setObjectName(QStringLiteral("AboutTitle"));
+        summary->setContentsMargins(16, 6, 16, 8);
+        layout->addWidget(summary);
+
+        if (latestDiffTruncated_) {
+            auto* trunc = new QLabel(
+                QStringLiteral("变化条目较多,仅显示前 %1 项(按变化量降序)。")
+                    .arg(latestDiffEntries_.size()),
+                &dialog);
+            trunc->setObjectName(QStringLiteral("EmptyStateHint"));
+            trunc->setContentsMargins(16, 0, 16, 8);
+            layout->addWidget(trunc);
+        }
+
+        // 差异表(复用 CleanupTree 主题观感;镜像 SMART 属性表设置)。
+        auto* table = new QTableWidget(static_cast<int>(latestDiffEntries_.size()), 5, &dialog);
+        table->setObjectName(QStringLiteral("CleanupTree"));
+        table->setHorizontalHeaderLabels({QStringLiteral("类型"), QStringLiteral("路径"),
+                                          QStringLiteral("变化量"), QStringLiteral("本次大小"),
+                                          QStringLiteral("上次大小")});
+        table->verticalHeader()->setVisible(false);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->setAlternatingRowColors(true);
+        table->setShowGrid(false);
+        table->setTextElideMode(Qt::ElideMiddle);  // 路径中部省略,保留盘符+文件名可辨识。
+        table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);  // 类型
+        table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);           // 路径
+        table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);  // 变化量
+        table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);  // 本次
+        table->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);  // 上次
+
+        for (int r = 0; r < static_cast<int>(latestDiffEntries_.size()); ++r) {
+            const core::ScanDiffEntry& e = latestDiffEntries_[static_cast<std::size_t>(r)];
+
+            QString typeText;
+            QString typeColor;
+            QString deltaSign;
+            switch (e.category) {
+                case core::ScanDiffCategory::New:
+                    typeText = QStringLiteral("新增");
+                    typeColor = g_activeTokens.good;
+                    deltaSign = QStringLiteral("+");
+                    break;
+                case core::ScanDiffCategory::Gone:
+                    typeText = QStringLiteral("消失");
+                    typeColor = g_activeTokens.danger;
+                    deltaSign = QStringLiteral("−");
+                    break;
+                case core::ScanDiffCategory::Growth:
+                    typeText = QStringLiteral("增长");
+                    typeColor = g_activeTokens.warn;
+                    deltaSign = QStringLiteral("+");
+                    break;
+                case core::ScanDiffCategory::Shrink:
+                    typeText = QStringLiteral("缩减");
+                    typeColor = g_activeTokens.textMuted;
+                    deltaSign = QStringLiteral("−");
+                    break;
+            }
+
+            auto* typeItem = new QTableWidgetItem(typeText);
+            typeItem->setForeground(QColor(typeColor));
+            typeItem->setTextAlignment(Qt::AlignCenter);
+
+            const QString displayPath = ToQString(e.displayPath);
+            auto* pathItem = new QTableWidgetItem(displayPath);
+            pathItem->setToolTip(displayPath);
+
+            const qint64 absDelta = e.delta >= 0 ? e.delta : -e.delta;
+            auto* deltaItem = new QTableWidgetItem(
+                deltaSign + ToQString(core::FormatBytes(static_cast<std::uint64_t>(absDelta))));
+            deltaItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            deltaItem->setForeground(QColor(typeColor));
+
+            // 本次大小:Gone 显示 —(文件已不存在)。
+            auto* currItem = new QTableWidgetItem(
+                e.category == core::ScanDiffCategory::Gone
+                    ? QStringLiteral("—")
+                    : ToQString(core::FormatBytes(static_cast<std::uint64_t>(e.currentBytes))));
+            currItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+            // 上次大小:New 显示 —(上次不存在)。
+            auto* prevItem = new QTableWidgetItem(
+                e.category == core::ScanDiffCategory::New
+                    ? QStringLiteral("—")
+                    : ToQString(core::FormatBytes(static_cast<std::uint64_t>(e.previousBytes))));
+            prevItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+            table->setItem(r, 0, typeItem);
+            table->setItem(r, 1, pathItem);
+            table->setItem(r, 2, deltaItem);
+            table->setItem(r, 3, currItem);
+            table->setItem(r, 4, prevItem);
+        }
+        table->resizeRowsToContents();
+        layout->addWidget(table, 1);
     }
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);

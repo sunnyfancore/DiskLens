@@ -72,6 +72,7 @@ if (BUILD_QT_UI)
         "${CMAKE_CURRENT_BINARY_DIR}/generated/QtApp.rc"
         src/core/CategoryStats.cpp
         src/core/AgeStats.cpp
+        src/core/ScanDiff.cpp
         src/core/DirectoryScanner.cpp
         src/core/DiskHealth.cpp
         src/core/FileHasher.cpp

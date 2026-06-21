@@ -5,6 +5,7 @@
 #include "core/FileHasher.h"
 #include "core/NtfsMftScanner.h"
 #include "core/ScanModels.h"
+#include "core/ScanDiff.h"
 #include "qt/ResultTableModel.h"
 #include "qt/TreemapWidget.h"
 #include "qt/CategoryDonutWidget.h"
@@ -752,6 +753,12 @@ private:
      * @param path 文件绝对路径。
      */
     void ShowFilePreview(const QString& path);
+
+    /**
+     * @brief D2:扫描对比对话框(会话内)。展示上次扫描→本次扫描同根路径的差异
+     *        (新增/消失/增长/缩减,仅 ≥1 MiB 文件)。无基线或换根时显示空态说明。
+     */
+    void ShowScanDiffDialog();
 
     /**
      * @brief 填充长期未动文件表格（按修改时间最旧排序）。
@@ -1925,6 +1932,43 @@ private:
      * @brief 最近一次扫描结果。
      */
     std::shared_ptr<core::ScanResult> latestResult_;
+
+    /**
+     * @brief D2:上次扫描的扁平快照(下次同根对比的基线)。后台线程建好经 shared_ptr 投递到 UI 线程。
+     *        首次扫描或换根后仅为「下次的基线」,本身不产生可展示 diff。
+     */
+    std::shared_ptr<core::FlatSnapshot> lastScanSnapshot_;
+
+    /**
+     * @brief D2:最近一次同根对比的差异条目(供 ShowScanDiffDialog 展示,已按 |delta| 降序)。
+     */
+    std::vector<core::ScanDiffEntry> latestDiffEntries_;
+
+    /**
+     * @brief D2:最近对比的根路径(显示用,原始大小写)。
+     */
+    QString latestDiffRootPath_;
+
+    /**
+     * @brief D2:最近对比的计数摘要(显示用)。
+     */
+    QString latestDiffSummary_;
+
+    /**
+     * @brief D2:是否存在可展示的同根对比结果(同根 + 有基线)。条目可为空(无变化)。
+     */
+    bool latestDiffAvailable_ = false;
+
+    /**
+     * @brief D2:最近对比是否因超上限截断了条目。
+     */
+    bool latestDiffTruncated_ = false;
+
+    /**
+     * @brief D2:跳过对比的原因(非空时 ShowScanDiffDialog 显示此说明而非空态/表格)。
+     *        覆盖两种情形:扫描被取消(部分树不入基线)、快照规模过大(UI 线程 diff 会卡顿)。
+     */
+    QString latestDiffSkipReason_;
 
     /**
      * @brief 最近一次扫描是否使用 NTFS MFT 极速通道。

@@ -43,6 +43,15 @@ public:
      */
     ScanResult Scan(const std::wstring& rootPath, const ProgressCallback& callback);
 
+    /**
+     * @brief 判断当前扫描是否已被取消。
+     * @return 已取消时返回 true。
+     *
+     * @note D2 扫描对比在后台线程上据此判断本次扫描是否被取消(取消返回部分结果,不应入对比基线)。
+     *       cancelled_ 为 std::atomic_bool,故可安全跨线程读取。
+     */
+    bool IsCancelled() const;
+
 private:
     /**
      * @brief 保存单个扫描线程的局部统计。
@@ -152,12 +161,6 @@ private:
      * @param callback 扫描过程中的进度回调。
      */
     void ReportProgress(const std::wstring& path, const ProgressCallback& callback);
-
-    /**
-     * @brief 判断当前扫描是否已被取消。
-     * @return 已取消时返回 true。
-     */
-    bool IsCancelled() const;
 
     /**
      * @brief 取消标记。
