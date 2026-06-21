@@ -109,6 +109,10 @@ protected:
      * @return 是否拦截事件。
      */
     bool eventFilter(QObject* watched, QEvent* event) override;
+    /**
+     * @brief F3:拦截 Windows 广播消息;系统浅/深色变化(WM_SETTINGCHANGE + ImmersiveColorSet)且当前为 auto 时重解析主题。
+     */
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private slots:
     /**
@@ -513,10 +517,20 @@ private:
     void UpdateModuleChrome();
 
     /**
-     * @brief 切换界面主题。
-     * @param themeName 主题名称。
+     * @brief 切换界面主题(交互式:菜单/首选项调用,会弹「已切换皮肤」信息栏)。
+     * @param themeName 主题选择(light/dark/blue/auto)。
      */
     void SetTheme(const QString& themeName);
+    /**
+     * @brief F3:应用主题选择(静默,无信息栏):置 themeChoice_,auto 时据系统浅/深色解析出具体 currentTheme_,
+     *        再 ApplyStyle + UpdateModuleChrome。供 LoadUiSettings / 系统主题变化重解析复用。
+     * @param choice 主题选择(light/dark/blue/auto)。
+     */
+    void ApplyThemeChoice(const QString& choice);
+    /**
+     * @brief F3:读取 Windows 系统浅/深色偏好(注册表 AppsUseLightTheme),返回 "light"/"dark";读不到默认 "light"。
+     */
+    QString ResolveSystemTheme() const;
 
     /**
      * @brief 创建单个摘要指标。
@@ -1008,9 +1022,14 @@ private:
     QWidget* treemapPanel_ = nullptr;
 
     /**
-     * @brief 当前界面主题名称。
+     * @brief 当前界面主题名称(始终为已解析的具体主题:light/dark/blue,永不为 "auto")。
+     *        ApplyStyle→ResolveThemeTokens 与标题栏 currentTheme_=="dark" 判定都依赖它是具体值。
      */
     QString currentTheme_ = QStringLiteral("light");
+    /**
+     * @brief F3:用户主题选择(可取 "auto"),持久化于 ui/theme;为 "auto" 时 currentTheme_ 由系统浅/深色解析得出。
+     */
+    QString themeChoice_ = QStringLiteral("light");
 
     /**
      * @brief 屏幕换接 / DPI 信号是否已挂接(在首次 showEvent 时挂一次)。

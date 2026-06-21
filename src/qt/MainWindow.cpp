@@ -3283,9 +3283,9 @@ void MainWindow::LoadUiSettings() {
     if (workspaceSplitter_ != nullptr && !splitterState.isEmpty()) {
         workspaceSplitter_->restoreState(splitterState);
     }
-    currentTheme_ = settings.value(QStringLiteral("ui/theme"), QStringLiteral("light")).toString();
-    ApplyStyle();
-    UpdateModuleChrome();
+    // F3:主题选择持久化(可取 "auto");ApplyThemeChoice 据 choice 解析出具体 currentTheme_(auto→系统浅/深色)。
+    themeChoice_ = settings.value(QStringLiteral("ui/theme"), QStringLiteral("light")).toString();
+    ApplyThemeChoice(themeChoice_);
 
     // 清理/去重默认选项持久化(默认与各复选框构造时一致:隐私/开发默认勾选,
     // 深度清理/永久删除默认不勾——故未设置过的用户行为零变化)。复选框在
@@ -3353,7 +3353,8 @@ void MainWindow::SaveUiSettings() const {
     if (workspaceSplitter_ != nullptr) {
         settings.setValue(QStringLiteral("ui/workspaceSplitter/v2"), workspaceSplitter_->saveState());
     }
-    settings.setValue(QStringLiteral("ui/theme"), currentTheme_);
+    // F3:持久化用户主题选择(含 "auto"),而非已解析的具体 currentTheme_(否则 auto 会被固化成 light/dark)。
+    settings.setValue(QStringLiteral("ui/theme"), themeChoice_);
 
     if (driveCombo_ != nullptr) {
         const QString currentPath = driveCombo_->currentText().trimmed();
@@ -3817,6 +3818,9 @@ QWidget* MainWindow::CreateApplicationMenu() {
     });
     themeMenu->addAction(QStringLiteral("蓝色清爽"), this, [this]() {
         SetTheme(QStringLiteral("blue"));
+    });
+    themeMenu->addAction(QStringLiteral("自动跟随系统"), this, [this]() {
+        SetTheme(QStringLiteral("auto"));  // F3:据系统浅/深色解析,系统变化时自动重解析。
     });
     createMenuButton(QStringLiteral("工具"), toolsMenu);
 
@@ -5017,13 +5021,53 @@ void MainWindow::OnWatchDebounceTimeout() {
  * @param themeName 目标皮肤名称，支持 light、dark、blue。
  */
 void MainWindow::SetTheme(const QString& themeName) {
-    currentTheme_ = themeName.isEmpty() ? QStringLiteral("light") : themeName;
-    ApplyStyle();
-    UpdateModuleChrome();
+    ApplyThemeChoice(themeName);
+    // F3:信息栏第 4 槽语义是「路径」,主题切换不应塞入内部 token(auto/light/dark/blue),
+    // 映射为用户可见的本地化主题名,与菜单/首选项一致。
+    const QString themeLabel =
+        themeChoice_ == QStringLiteral("auto") ? QStringLiteral("自动跟随系统") :
+        themeChoice_ == QStringLiteral("dark")  ? QStringLiteral("暗色大师") :
+        themeChoice_ == QStringLiteral("blue")  ? QStringLiteral("蓝色清爽") :
+                                                  QStringLiteral("浅色专业");
     SetInfoBar(QStringLiteral("已切换皮肤"),
                latestResult_ != nullptr ? latestResult_->fileCount : 0,
                latestResult_ != nullptr ? latestResult_->directoryCount : 0,
-               currentTheme_);
+               themeLabel);
+}
+
+void MainWindow::ApplyThemeChoice(const QString& choice) {
+    themeChoice_ = choice.isEmpty() ? QStringLiteral("light") : choice;
+    // 关键:currentTheme_ 始终为具体主题(light/dark/blue),永不为 "auto"——ApplyStyle 的
+    // ResolveThemeTokens(currentTheme_) 与标题栏 currentTheme_=="dark" 判定都依赖它是具体值。
+    const QString resolved = (themeChoice_ == QStringLiteral("auto")) ? ResolveSystemTheme() : themeChoice_;
+    // 幂等:无论 auto 还是手动,每次都重新解析(auto 才能响应系统变化),但解析后若具体主题未变就跳过
+    // 昂贵的 ApplyStyle——系统过渡动画/强调色变更会多次广播 ImmersiveColorSet,冗余广播不应反复重算 QSS。
+    if (resolved == currentTheme_) {
+        return;
+    }
+    currentTheme_ = resolved;
+    ApplyStyle();
+    UpdateModuleChrome();
+}
+
+QString MainWindow::ResolveSystemTheme() const {
+#ifdef Q_OS_WIN
+    // 读 HKCU\...\Themes\Personalize\AppsUseLightTheme:1=浅色,0=暗色。读不到默认浅色(保守)。
+    HKEY hKey = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                      0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        DWORD value = 1;
+        DWORD size = sizeof(value);
+        const LSTATUS ok = RegQueryValueExW(hKey, L"AppsUseLightTheme", nullptr, nullptr,
+                                            reinterpret_cast<LPBYTE>(&value), &size);
+        RegCloseKey(hKey);
+        if (ok == ERROR_SUCCESS) {
+            return value == 0 ? QStringLiteral("dark") : QStringLiteral("light");
+        }
+    }
+#endif
+    return QStringLiteral("light");
 }
 
 void MainWindow::ApplyStyle() {
@@ -5991,6 +6035,24 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         }
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef Q_OS_WIN
+    // F3 自动跟随系统深/浅色:系统主题切换时广播 WM_SETTINGCHANGE,lParam 指向 "ImmersiveColorSet"。
+    // 仅当用户选了 "auto" 才静默重解析(不弹"已切换皮肤"信息栏);手动选的具体主题不受影响。
+    if (eventType == "windows_generic_MSG" && message != nullptr) {
+        MSG* msg = reinterpret_cast<MSG*>(message);
+        if (msg->message == WM_SETTINGCHANGE && msg->lParam != 0) {
+            const wchar_t* section = reinterpret_cast<const wchar_t*>(msg->lParam);
+            if (lstrcmpiW(section, L"ImmersiveColorSet") == 0
+                && themeChoice_ == QStringLiteral("auto")) {
+                ApplyThemeChoice(QStringLiteral("auto"));  // 系统浅/深色变化:静默重解析。
+            }
+        }
+    }
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
@@ -7573,7 +7635,8 @@ void MainWindow::ShowPreferencesDialog() {
     themeCombo->addItem(QStringLiteral("浅色专业"), QStringLiteral("light"));
     themeCombo->addItem(QStringLiteral("暗色大师"), QStringLiteral("dark"));
     themeCombo->addItem(QStringLiteral("蓝色清爽"), QStringLiteral("blue"));
-    themeCombo->setCurrentIndex(qMax(0, themeCombo->findData(currentTheme_)));
+    themeCombo->addItem(QStringLiteral("自动跟随系统"), QStringLiteral("auto"));
+    themeCombo->setCurrentIndex(qMax(0, themeCombo->findData(themeChoice_)));  // F3:按用户选择(含 auto)高亮,而非已解析的 currentTheme_。
     auto* themeHint = new QLabel(QStringLiteral("切换会立即生效。也可在「工具 · 主题皮肤」菜单快速切换。"), appearancePage);
     themeHint->setWordWrap(true);
     themeHint->setObjectName(QStringLiteral("EmptyStateHint"));
@@ -7707,7 +7770,7 @@ void MainWindow::ShowPreferencesDialog() {
 
     // 应用:主题立即切换,四个开关写回成员复选框(既有扫描/删除消费路径自动生效)。
     const QString chosenTheme = themeCombo->currentData().toString();
-    if (!chosenTheme.isEmpty() && chosenTheme != currentTheme_) {
+    if (!chosenTheme.isEmpty() && chosenTheme != themeChoice_) {  // F3:与用户选择(含 auto)比,而非已解析的 currentTheme_。
         SetTheme(chosenTheme);
     }
     if (cleanupPrivacyCheckBox_ != nullptr) {
