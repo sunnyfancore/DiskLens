@@ -40,6 +40,7 @@ class QPushButton;
 class QResizeEvent;
 class QSplitter;
 class QStackedWidget;
+class QSystemTrayIcon;
 class QTabWidget;
 class QTableWidget;
 class QTableView;
@@ -77,6 +78,12 @@ protected:
      * @param event Qt 关闭事件。
      */
     void closeEvent(QCloseEvent* event) override;
+
+    /**
+     * @brief F2:窗口状态变化(最小化)时,若开启最小化到托盘则藏入托盘而不留任务栏。
+     * @param event Qt 状态变化事件。
+     */
+    void changeEvent(QEvent* event) override;
 
     /**
      * @brief 窗口首次显示时挂接屏幕换接 / DPI 变化信号,用于刷新图标缓存。
@@ -531,6 +538,19 @@ private:
      * @brief F3:读取 Windows 系统浅/深色偏好(注册表 AppsUseLightTheme),返回 "light"/"dark";读不到默认 "light"。
      */
     QString ResolveSystemTheme() const;
+
+    /**
+     * @brief F2:按 trayEnabled_ 显示/隐藏系统托盘图标并刷新其状态。幂等,构造与首选项切换时调用。
+     */
+    void EnsureTray();
+    /**
+     * @brief F2:据扫描中/空闲更新托盘提示文本(图标复用应用图标,无额外图标资源)。
+     */
+    void UpdateTray();
+    /**
+     * @brief F2:托盘「退出」菜单:置 reallyQuit_ 后真正关闭(走 closeEvent 真实收尾路径,而非最小化到托盘)。
+     */
+    void QuitFromTray();
 
     /**
      * @brief 创建单个摘要指标。
@@ -1276,6 +1296,22 @@ private:
      * @brief E4:是否启用周期重扫(QSettings 键 watch/periodicRescan,默认 false);仅当 liveWatchEnabled_ 亦开启时生效。
      */
     bool periodicRescanEnabled_ = false;
+    /**
+     * @brief F2:系统托盘图标(父对象 this,随主窗口析构销毁);仅在 trayEnabled_ 为真时 show()。
+     */
+    QSystemTrayIcon* trayIcon_ = nullptr;
+    /**
+     * @brief F2:是否显示系统托盘图标(QSettings 键 tray/enabled,默认 false);LOCAL-ONLY 默认不驻留托盘。
+     */
+    bool trayEnabled_ = false;
+    /**
+     * @brief F2:最小化/关闭是否藏入托盘(QSettings 键 tray/minimizeToTray,默认 false);仅在 trayEnabled_ 为真时生效。
+     */
+    bool minimizeToTrayEnabled_ = false;
+    /**
+     * @brief F2:真实退出标志;托盘「退出」/系统关机(WM_QUERYENDSESSION)置真,使 closeEvent 走收尾而非最小化到托盘。
+     */
+    std::atomic_bool reallyQuit_{false};
 
     /**
      * @brief 快速搜索结果表格。

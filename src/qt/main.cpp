@@ -19,6 +19,10 @@ int main(int argc, char* argv[]) {
     application.setApplicationDisplayName(QStringLiteral("磁盘洞察"));
     application.setOrganizationName(QStringLiteral("SunnyFan"));
     application.setWindowIcon(QIcon(QStringLiteral(":/icons/app.ico")));
+    // F2 系统托盘:关闭「最后一个可见窗口关闭即退出」默认行为。最小化到托盘时主窗口 hide()
+    // (而非 close),真实退出改由 closeEvent 末尾显式 QCoreApplication::quit() 触发——否则从托盘
+    // 「退出」时窗口已隐藏,close() 不会触发 lastWindowClosed,application.exec() 永不返回,进程僵死。
+    application.setQuitOnLastWindowClosed(false);
 
     disk_lens::qt_ui::MainWindow window;
     window.show();

@@ -45,6 +45,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
+#include <QSystemTrayIcon>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QPainter>
@@ -1959,6 +1960,41 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     periodicRescanTimer_->setInterval(900000);  // 15 分钟重复(路线图最小间隔)。
     connect(periodicRescanTimer_, &QTimer::timeout, this, &MainWindow::OnPeriodicRescanTick);
 
+    // F2 系统托盘:图标复用应用图标(:/icons/app.ico),无额外图标资源。父对象 this,随主窗口析构销毁。
+    // 双击/中键切显隐;右键弹菜单(显示/退出)。是否显示由 trayEnabled_ 经 EnsureTray 仲裁。
+    trayIcon_ = new QSystemTrayIcon(QIcon(QStringLiteral(":/icons/app.ico")), this);
+    trayIcon_->setToolTip(QStringLiteral("磁盘洞察"));
+    auto* trayMenu = new QMenu(this);
+    trayMenu->addAction(QStringLiteral("显示主窗口"), this, [this]() {
+        showNormal();
+        raise();
+        activateWindow();
+        // F2:从托盘恢复后重新按当前页/开关 arming 后台监控(对称藏入托盘时的暂停)。
+        ReevaluateWatcher();
+        ReevaluateHealthRefresh();
+        ReevaluatePeriodicRescan();
+    });
+    trayMenu->addAction(QStringLiteral("退出"), this, &MainWindow::QuitFromTray);
+    trayIcon_->setContextMenu(trayMenu);
+    connect(trayIcon_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
+            // 已显则不重复 raise;藏/最小化则恢复。
+            const bool wasHidden = isHidden() || isMinimized();
+            if (wasHidden) {
+                showNormal();
+            }
+            raise();
+            activateWindow();
+            if (wasHidden) {  // F2:仅从隐藏恢复时重新 arming 后台监控(本已可见则无需)。
+                ReevaluateWatcher();
+                ReevaluateHealthRefresh();
+                ReevaluatePeriodicRescan();
+            }
+        }
+    });
+    EnsureTray();  // 据 trayEnabled_(LoadUiSettings 已读)决定显示与否;未开启则不驻留托盘。
+    UpdateTray();
+
     InstallShortcuts();
 
     directoryTree_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2289,6 +2325,23 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    // F2:开启最小化到托盘且非真实退出(用户点 X,非托盘「退出」/系统关机)→ 拦截关闭,仅隐藏窗口。
+    // 不走下面的收尾(拆 watcher / 回收 worker 线程 / SaveUiSettings),因为应用仍在后台驻留。
+    // 真实退出路径(reallyQuit_=true)才执行既有 E3 收尾。
+    if (trayEnabled_ && minimizeToTrayEnabled_ && !reallyQuit_.load()) {
+        // F2:藏入托盘前暂停后台监控(健康刷新 / 周期重扫 / 文件夹监视),避免托盘驻留时静默后台磁盘 I/O
+        // (托盘提示「空闲」时不应有 IOCTL/重扫)。进行中的扫描不中断,其完成回投在恢复后刷新 UI。
+        if (healthRefreshTimer_ != nullptr) {
+            healthRefreshTimer_->stop();
+        }
+        if (periodicRescanTimer_ != nullptr) {
+            periodicRescanTimer_->stop();
+        }
+        DisarmWatcher();
+        hide();
+        event->ignore();
+        return;
+    }
     // E3:先置退出标志,health worker 回投前检查即不再触碰 this;再停定时器 + 严格 join 后台线程,
     // 杜绝周期触发放大的「关闭时 worker 回投 this 撞上主窗口析构」UAF。
     quitting_.store(true);
@@ -2317,6 +2370,32 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     DisarmWatcher();  // E2:关闭时先拆 watcher,防御性(父对象析构本也会销毁)。
     SaveUiSettings();
     QMainWindow::closeEvent(event);
+    // F2:已设 setQuitOnLastWindowClosed(false),且窗口此时多为已隐藏(从托盘「退出」)/被关闭,
+    // 不会触发 lastWindowClosed 自动退出,故真实退出路径末尾显式退出事件循环(覆盖 QuitFromTray / WM_QUERYENDSESSION)。
+    QCoreApplication::quit();
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    // F2:最小化到托盘开启时,点最小化按钮直接藏入托盘(从任务栏移除),而非停在任务栏。
+    // 仅在 trayEnabled_ + minimizeToTrayEnabled_ 时拦截最小化;其他状态变化透传基类。
+    if (event->type() == QEvent::WindowStateChange && trayEnabled_ && minimizeToTrayEnabled_ && isMinimized()) {
+        QTimer::singleShot(0, this, [this]() {
+            // 延迟到事件处理完毕再 hide,避免重入;并复核状态——若用户在此间隙已从托盘恢复(非最小化),不藏。
+            if (!isMinimized()) {
+                return;
+            }
+            // 暂停后台监控(对称 closeEvent 藏入托盘暂停),避免托盘驻留时静默后台磁盘 I/O。
+            if (healthRefreshTimer_ != nullptr) {
+                healthRefreshTimer_->stop();
+            }
+            if (periodicRescanTimer_ != nullptr) {
+                periodicRescanTimer_->stop();
+            }
+            DisarmWatcher();
+            hide();
+        });
+    }
+    QMainWindow::changeEvent(event);
 }
 
 void MainWindow::showEvent(QShowEvent* event) {
@@ -3314,6 +3393,11 @@ void MainWindow::LoadUiSettings() {
     healthRefreshEnabled_ = settings.value(QStringLiteral("health/refreshEnabled"), false).toBool();
     healthAlertEnabled_ = settings.value(QStringLiteral("health/alertEnabled"), false).toBool();
 
+    // F2:系统托盘图标 / 最小化到托盘开关,均默认关闭(LOCAL-ONLY 默认不驻留托盘;未设置过的用户行为零变化)。
+    // 不在此处调 EnsureTray——此时 trayIcon_ 尚未构造(构造函数在 LoadUiSettings 之后才 new);由构造函数 EnsureTray。
+    trayEnabled_ = settings.value(QStringLiteral("tray/enabled"), false).toBool();
+    minimizeToTrayEnabled_ = settings.value(QStringLiteral("tray/minimizeToTray"), false).toBool();
+
     const QStringList recentPaths = settings.value(QStringLiteral("scan/recentPaths")).toStringList();
     if (driveCombo_ != nullptr) {
         for (const QString& path : recentPaths) {
@@ -3388,6 +3472,10 @@ void MainWindow::SaveUiSettings() const {
     // E3 健康监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
     settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
     settings.setValue(QStringLiteral("health/alertEnabled"), healthAlertEnabled_);
+
+    // F2 系统托盘开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
+    settings.setValue(QStringLiteral("tray/enabled"), trayEnabled_);
+    settings.setValue(QStringLiteral("tray/minimizeToTray"), minimizeToTrayEnabled_);
 
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
@@ -4964,6 +5052,7 @@ void MainWindow::ReevaluateWatcher() {
     }
     const bool shouldWatch = liveWatchEnabled_ &&
                              IsOnDiskAnalysisPage() &&
+                             isVisible() &&  // F2:窗口藏入托盘(hide)时isVisible()为假,不 arm——避免托盘驻留时静默后台重扫。
                              latestResult_ != nullptr &&
                              latestResult_->root != nullptr;
     if (!shouldWatch) {
@@ -5068,6 +5157,36 @@ QString MainWindow::ResolveSystemTheme() const {
     }
 #endif
     return QStringLiteral("light");
+}
+
+void MainWindow::EnsureTray() {
+    if (trayIcon_ == nullptr) {
+        return;  // 构造期早返回(LoadUiSettings 在 trayIcon_ 创建前调 EnsureTray 无害);防御性。
+    }
+    // 不支持托盘的系统(QSystemTrayIcon::isSystemTrayAvailable)亦不强显示,避免空图标。
+    if (trayEnabled_ && QSystemTrayIcon::isSystemTrayAvailable()) {
+        trayIcon_->show();
+    } else {
+        trayIcon_->hide();
+    }
+    UpdateTray();
+}
+
+void MainWindow::UpdateTray() {
+    if (trayIcon_ == nullptr) {
+        return;
+    }
+    // 图标复用应用图标,仅以提示文本反映扫描中/空闲(无 busy 图标资源,避免引入资源/主题色依赖)。
+    const QString tip = scanning_.load()
+        ? QStringLiteral("磁盘洞察 — 正在扫描…")
+        : QStringLiteral("磁盘洞察 — 空闲");
+    trayIcon_->setToolTip(tip);
+}
+
+void MainWindow::QuitFromTray() {
+    // 真实退出:置标志使 closeEvent 跳过「最小化到托盘」分支,走既有 E3 收尾(join worker / 拆 watcher / 存设置)。
+    reallyQuit_.store(true);
+    close();
 }
 
 void MainWindow::ApplyStyle() {
@@ -6050,6 +6169,17 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 ApplyThemeChoice(QStringLiteral("auto"));  // 系统浅/深色变化:静默重解析。
             }
         }
+        // F2:系统注销/关机询问关闭时(WM_QUERYENDSESSION),置真实退出标志,
+        // 使随后的 closeEvent 走收尾而非「最小化到托盘」拦截——否则托盘驻留会阻塞系统关机。
+        // 仅置标志、不改变返回值,默认交基类应答(TRUE 允许关闭)。
+        if (msg->message == WM_QUERYENDSESSION) {
+            reallyQuit_.store(true);
+        }
+        // WM_QUERYENDSESSION 是可否决的询问:若被其他应用/用户否决,系统发 WM_ENDSESSION(wParam=FALSE),
+        // 会话未真正结束。此时撤销预置的退出标志,恢复「最小化到托盘」语义(否则该进程此后 X 即真实退出)。
+        if (msg->message == WM_ENDSESSION && msg->wParam == FALSE) {
+            reallyQuit_.store(false);
+        }
     }
 #endif
     return QMainWindow::nativeEvent(eventType, message, result);
@@ -6238,6 +6368,7 @@ void MainWindow::StartScan() {
     scanButton_->setEnabled(false);
     stopButton_->setEnabled(true);
     SetBusyState(true, QStringLiteral("扫描中"));
+    UpdateTray();  // F2:托盘提示切到「正在扫描…」。
     FlushImmediateFeedback();
     directoryTree_->clear();
     if (directoryModel_ != nullptr) {
@@ -6419,6 +6550,7 @@ void MainWindow::StartScan() {
             lastScanModeDetail_ = modeDetail;
             scanning_.store(false);
             SetBusyState(false, QString());
+            UpdateTray();  // F2:扫描完成(含取消走此完成路径),托盘提示切回「空闲」。
             SetInfoBar(QStringLiteral("完成：%1").arg(modeText),
                        latestResult_ ? latestResult_->fileCount : 0,
                        latestResult_ ? latestResult_->directoryCount : 0,
@@ -7643,6 +7775,31 @@ void MainWindow::ShowPreferencesDialog() {
     appearanceLayout->addWidget(themeCaption);
     appearanceLayout->addWidget(themeCombo);
     appearanceLayout->addWidget(themeHint);
+
+    // F2 系统托盘(默认关闭:LOCAL-OPEN 不强制驻留托盘)。两开关从属:最小化到托盘仅在显示托盘开启时可用。
+    auto* traySection = new QLabel(QStringLiteral("系统托盘"), appearancePage);
+    traySection->setObjectName(QStringLiteral("AboutTitle"));
+    auto* trayEnabledBox = new QCheckBox(QStringLiteral("显示系统托盘图标(便于后台运行 / 快速唤起)"), appearancePage);
+    auto* minimizeToTrayBox = new QCheckBox(QStringLiteral("最小化 / 关闭时隐藏到托盘而非退出"), appearancePage);
+    trayEnabledBox->setChecked(trayEnabled_);
+    minimizeToTrayBox->setChecked(minimizeToTrayEnabled_);
+    minimizeToTrayBox->setEnabled(trayEnabled_);  // 从属:托盘未开启时禁用。
+    auto* trayHint = new QLabel(QStringLiteral("托盘图标提示当前是扫描中还是空闲;右键可显示主窗口或退出。"), appearancePage);
+    trayHint->setWordWrap(true);
+    trayHint->setObjectName(QStringLiteral("EmptyStateHint"));
+    // 主开关关时同时清从属勾选(非仅禁用),持久化保持一致:避免「托盘关 / 最小化到托盘仍 true」
+    // 的不对称,以及日后重开托盘时静默复 arming 最小化到托盘。
+    QObject::connect(trayEnabledBox, &QCheckBox::toggled, appearancePage, [minimizeToTrayBox](bool on) {
+        minimizeToTrayBox->setEnabled(on);
+        if (!on) {
+            minimizeToTrayBox->setChecked(false);
+        }
+    });
+    appearanceLayout->addWidget(traySection);
+    appearanceLayout->addWidget(trayEnabledBox);
+    appearanceLayout->addWidget(minimizeToTrayBox);
+    appearanceLayout->addWidget(trayHint);
+
     appearanceLayout->addStretch(1);
     tabs->addTab(appearancePage, QStringLiteral("外观"));
 
@@ -7796,6 +7953,14 @@ void MainWindow::ShowPreferencesDialog() {
     healthRefreshEnabled_ = healthRefreshBox->isChecked();
     healthAlertEnabled_ = healthAlertBox->isChecked();
 
+    // F2 系统托盘开关写回成员;显示开关变化时立即 show/hide 托盘图标(最小化到托盘随 next close 生效)。
+    const bool prevTrayEnabled = trayEnabled_;
+    trayEnabled_ = trayEnabledBox->isChecked();
+    minimizeToTrayEnabled_ = minimizeToTrayBox->isChecked();
+    if (trayEnabled_ != prevTrayEnabled) {
+        EnsureTray();
+    }
+
     // 立即落盘各开关(主题经 SetTheme 已更新 currentTheme_,会在关闭窗口时随 ui/theme 持久化)。
     {
         QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
@@ -7807,6 +7972,8 @@ void MainWindow::ShowPreferencesDialog() {
         settings.setValue(QStringLiteral("watch/periodicRescan"), periodicRescanEnabled_);
         settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
         settings.setValue(QStringLiteral("health/alertEnabled"), healthAlertEnabled_);
+        settings.setValue(QStringLiteral("tray/enabled"), trayEnabled_);
+        settings.setValue(QStringLiteral("tray/minimizeToTray"), minimizeToTrayEnabled_);
     }
     ReevaluateWatcher();
     ReevaluateHealthRefresh();  // E3:开关变化后重新评估定时器启停。
@@ -8099,8 +8266,9 @@ void MainWindow::ReevaluateHealthRefresh() {
     }
     // 周期健康刷新与目录扫描互不依赖:SMART/NVMe 是物理盘只读 IOCTL,跑在独立 worker 线程,
     // 不触碰扫描结果树;故不 gate on scanning_(与 ReevaluateWatcher 不同),扫描中亦可刷新。
-    // 仅按开关 + 当前是否在健康页决定定时器启停:在健康页且启用→运行(每 5min 自动刷新);切走/关开关→停。
-    if (healthRefreshEnabled_ && IsOnHealthPage()) {
+    // 仅按开关 + 当前是否在健康页 + 窗口可见决定定时器启停:在健康页且启用且可见→运行(每 5min 自动刷新);
+    // 切走/关开关/藏入托盘→停(F2:托盘驻留时不做静默健康 IOCTL;恢复时由 Reevaluate 重新 arm)。
+    if (healthRefreshEnabled_ && IsOnHealthPage() && isVisible()) {
         if (!healthRefreshTimer_->isActive()) {
             healthRefreshTimer_->start();
         }
@@ -8129,6 +8297,7 @@ void MainWindow::ReevaluatePeriodicRescan() {
     const bool active = liveWatchEnabled_ &&
                         periodicRescanEnabled_ &&
                         IsOnDiskAnalysisPage() &&
+                        isVisible() &&  // F2:窗口藏入托盘时不运行,避免静默后台重扫;恢复时由 Reevaluate 重新 arm。
                         latestResult_ != nullptr &&
                         latestResult_->root != nullptr;
     if (active) {
