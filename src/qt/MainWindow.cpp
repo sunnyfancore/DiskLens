@@ -69,6 +69,7 @@
 #include <QTableView>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QThread>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QUrl>
@@ -1938,6 +1939,20 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     watchDebounceTimer_->setInterval(500);
     connect(watchDebounceTimer_, &QTimer::timeout, this, &MainWindow::OnWatchDebounceTimeout);
 
+    // E3 周期健康刷新:owned QThread + worker QObject 承载后台 SMART/NVMe 读取,替代 detached std::thread,
+    // 使关闭时能 quit()+wait() 严格 join(配合 quitting_ 守卫),杜绝周期触发放大的「关闭时 UAF」。
+    // 关键:invokeMethod(healthWorker_, ...) 因 healthWorker_ 已 moveToThread,其线程亲缘性是 worker 线程,
+    // 投递的 lambda 在 worker 线程执行;若误投递到 QThread 对象本身(其亲缘性是 UI 线程)会在 UI 线程跑,阻塞界面。
+    healthWorkerThread_ = new QThread(this);
+    healthWorker_ = new QObject();  // 无父对象,便于跨线程移动;随线程 finished→deleteLater 回收。
+    healthWorker_->moveToThread(healthWorkerThread_);
+    connect(healthWorkerThread_, &QThread::finished, healthWorker_, &QObject::deleteLater);
+    healthWorkerThread_->start();
+    healthRefreshTimer_ = new QTimer(this);
+    healthRefreshTimer_->setSingleShot(false);
+    healthRefreshTimer_->setInterval(300000);  // 5 分钟重复。
+    connect(healthRefreshTimer_, &QTimer::timeout, this, &MainWindow::OnHealthRefreshTick);
+
     InstallShortcuts();
 
     directoryTree_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2268,6 +2283,28 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    // E3:先置退出标志,health worker 回投前检查即不再触碰 this;再停定时器 + 严格 join 后台线程,
+    // 杜绝周期触发放大的「关闭时 worker 回投 this 撞上主窗口析构」UAF。
+    quitting_.store(true);
+    if (healthRefreshTimer_ != nullptr) {
+        healthRefreshTimer_->stop();
+    }
+    CancelDiskHealth();  // 置 healthQueryCancel_(信息性,配合 quitting_ 守卫;QueryAll 内部不可取消,靠回投前守卫兜底)。
+    if (healthWorkerThread_ != nullptr) {
+        healthWorkerThread_->quit();   // 投递退出事件到 worker 事件循环(若正卡在 QueryAll,完成后才处理)。
+        if (healthWorkerThread_->wait(5000)) {
+            // 线程已 join:显式回收 worker,避免 deleteLater 排在已退出的事件循环里漏排(每进程仅一个,无害但求干净)。
+            delete healthWorker_;
+            healthWorker_ = nullptr;
+        } else {
+            // 极端慢盘(休眠唤醒的 HDD / 卡顿 USB-SATA / 慢 RAID)可能让一次同步 QueryAll 超过 5s。
+            // wait 超时后若 healthWorkerThread_ 仍为 this 子对象,~MainWindow 析构会销毁运行中的 QThread,
+            // 触发 qFatal("QThread: Destroyed while thread is still running")→ abort。解除父子关系让其异步自终:
+            // QueryAll 完成后由 quitting_ 守卫跳过回投 this,线程处理 quit 后退出,不再阻塞主窗口析构。
+            // QThread / worker 随进程退出回收。
+            healthWorkerThread_->setParent(nullptr);
+        }
+    }
     DisarmWatcher();  // E2:关闭时先拆 watcher,防御性(父对象析构本也会销毁)。
     SaveUiSettings();
     QMainWindow::closeEvent(event);
@@ -3259,6 +3296,11 @@ void MainWindow::LoadUiSettings() {
     // E2:实时文件夹监控开关,默认关闭(未设置过的用户行为零变化)。
     liveWatchEnabled_ = settings.value(QStringLiteral("watch/liveEnabled"), false).toBool();
 
+    // E3:周期健康刷新 / 状态转换告警开关,均默认关闭(未设置过的用户行为零变化)。
+    // 不在此处调 ReevaluateHealthRefresh——此时 1925 的定时器尚未构造,且启动页非健康页,定时器本就该停。
+    healthRefreshEnabled_ = settings.value(QStringLiteral("health/refreshEnabled"), false).toBool();
+    healthAlertEnabled_ = settings.value(QStringLiteral("health/alertEnabled"), false).toBool();
+
     const QStringList recentPaths = settings.value(QStringLiteral("scan/recentPaths")).toStringList();
     if (driveCombo_ != nullptr) {
         for (const QString& path : recentPaths) {
@@ -3325,6 +3367,10 @@ void MainWindow::SaveUiSettings() const {
 
     // E2 实时文件夹监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
     settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
+
+    // E3 健康监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
+    settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
+    settings.setValue(QStringLiteral("health/alertEnabled"), healthAlertEnabled_);
 
     const QList<QPair<QString, QTableView*>> views = {
         {QStringLiteral("directory"), directoryView_},
@@ -4830,6 +4876,7 @@ void MainWindow::UpdateModuleChrome() {
     }
 
     ReevaluateWatcher();
+    ReevaluateHealthRefresh();  // E3:模块/标签页切换后重新评估健康刷新定时器启停(切到健康页才运行)。
 }
 
 bool MainWindow::IsOnDiskAnalysisPage() const {
@@ -5574,6 +5621,36 @@ void MainWindow::ApplyStyle() {
             min-width: 24px;
         }
         QPushButton#GrowthAlertClose:hover {
+            color: @danger;
+            background: @accentSoft;
+            border-radius: @controlRadius;
+        }
+
+        /* E3 健康状态转换告警横幅:度量卡观感 + 左侧 @danger 提示条(健康恶化比空间增长更需关注) */
+        QFrame#HealthAlert {
+            background: @cardBg;
+            border: 1px solid @cardBorder;
+            border-left: 4px solid @danger;
+            border-radius: @cardRadius;
+        }
+        QLabel#HealthAlertTitle {
+            color: @danger;
+            font-weight: 700;
+            font-size: @fsCaption;
+        }
+        QLabel#HealthAlertBody {
+            color: @textPrimary;
+            font-size: @fsBody;
+        }
+        QPushButton#HealthAlertClose {
+            background: transparent;
+            border: none;
+            color: @textMuted;
+            font-size: @fsTitle;
+            padding: 0 8px;
+            min-width: 24px;
+        }
+        QPushButton#HealthAlertClose:hover {
             color: @danger;
             background: @accentSoft;
             border-radius: @controlRadius;
@@ -7420,7 +7497,34 @@ QWidget* MainWindow::CreateHealthTab() {
     healthCardsLayout_->addStretch(1);
     healthScroll_->setWidget(healthCardsHost_);
 
+    // E3 健康状态转换告警横幅:置于 hero 标题与卡片列表之间,默认隐藏;周期刷新检测到磁盘状态恶化时显示。
+    healthAlertFrame_ = new QFrame(page);
+    healthAlertFrame_->setObjectName(QStringLiteral("HealthAlert"));
+    auto* healthAlertLayout = new QHBoxLayout(healthAlertFrame_);
+    healthAlertLayout->setContentsMargins(12, 8, 8, 8);
+    healthAlertLayout->setSpacing(10);
+    auto* healthAlertTitle = new QLabel(QStringLiteral("⚠  健康告警"), healthAlertFrame_);
+    healthAlertTitle->setObjectName(QStringLiteral("HealthAlertTitle"));
+    healthAlertBodyLabel_ = new QLabel(healthAlertFrame_);
+    healthAlertBodyLabel_->setObjectName(QStringLiteral("HealthAlertBody"));
+    healthAlertBodyLabel_->setTextFormat(Qt::PlainText);
+    healthAlertBodyLabel_->setWordWrap(true);
+    auto* healthAlertClose = new QPushButton(QStringLiteral("×"), healthAlertFrame_);
+    healthAlertClose->setObjectName(QStringLiteral("HealthAlertClose"));
+    healthAlertClose->setCursor(Qt::PointingHandCursor);
+    healthAlertClose->setToolTip(QStringLiteral("关闭告警(仅在检测到新的状态下滑时再次提示)"));
+    healthAlertLayout->addWidget(healthAlertTitle);
+    healthAlertLayout->addWidget(healthAlertBodyLabel_, 1);
+    healthAlertLayout->addWidget(healthAlertClose);
+    healthAlertFrame_->setVisible(false);
+    connect(healthAlertClose, &QPushButton::clicked, this, [this]() {
+        if (healthAlertFrame_ != nullptr) {
+            healthAlertFrame_->setVisible(false);
+        }
+    });
+
     layout->addWidget(hero);
+    layout->addWidget(healthAlertFrame_);  // E3 告警横幅。
     layout->addWidget(healthScroll_, 1);
 
     return page;
@@ -7530,6 +7634,30 @@ void MainWindow::ShowPreferencesDialog() {
     autoLayout->addStretch(1);
     tabs->addTab(autoPage, QStringLiteral("实时监控"));
 
+    // —— 健康监控页:E3 周期健康刷新 + 状态转换告警(两个独立开关,均默认关闭,纯本地不联网) ——
+    auto* healthPrefPage = new QWidget(&dialog);
+    healthPrefPage->setObjectName(QStringLiteral("PrefPage"));
+    healthPrefPage->setAttribute(Qt::WA_StyledBackground, true);
+    auto* healthPrefLayout = new QVBoxLayout(healthPrefPage);
+    healthPrefLayout->setContentsMargins(22, 20, 22, 18);
+    healthPrefLayout->setSpacing(10);
+    auto* healthPrefCaption = new QLabel(QStringLiteral("磁盘健康自动监控（仅在本机读取 SMART / NVMe，纯本地）"), healthPrefPage);
+    healthPrefCaption->setWordWrap(true);
+    healthPrefCaption->setObjectName(QStringLiteral("AboutTitle"));
+    auto* healthRefreshBox = new QCheckBox(QStringLiteral("定时刷新健康信息（停留在健康页时每 5 分钟自动读取一次，默认关闭）"), healthPrefPage);
+    healthRefreshBox->setChecked(healthRefreshEnabled_);
+    auto* healthAlertBox = new QCheckBox(QStringLiteral("磁盘状态恶化时告警（自动检测到状态下滑时在健康页提示，默认关闭）"), healthPrefPage);
+    healthAlertBox->setChecked(healthAlertEnabled_);
+    auto* healthPrefHint = new QLabel(QStringLiteral("两个开关相互独立，可单独启用。读取物理盘需要管理员权限；监控仅在本机进行，不联网、不上传任何数据。"), healthPrefPage);
+    healthPrefHint->setWordWrap(true);
+    healthPrefHint->setObjectName(QStringLiteral("EmptyStateHint"));
+    healthPrefLayout->addWidget(healthPrefCaption);
+    healthPrefLayout->addWidget(healthRefreshBox);
+    healthPrefLayout->addWidget(healthAlertBox);
+    healthPrefLayout->addWidget(healthPrefHint);
+    healthPrefLayout->addStretch(1);
+    tabs->addTab(healthPrefPage, QStringLiteral("健康监控"));
+
     layout->addWidget(tabs, 1);
 
     auto* buttons = new QDialogButtonBox(&dialog);
@@ -7576,6 +7704,10 @@ void MainWindow::ShowPreferencesDialog() {
     // 实时监控开关写回成员(E2),立即生效。
     liveWatchEnabled_ = liveWatchBox->isChecked();
 
+    // E3 健康监控两个独立开关写回成员,立即生效。
+    healthRefreshEnabled_ = healthRefreshBox->isChecked();
+    healthAlertEnabled_ = healthAlertBox->isChecked();
+
     // 立即落盘各开关(主题经 SetTheme 已更新 currentTheme_,会在关闭窗口时随 ui/theme 持久化)。
     {
         QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
@@ -7584,8 +7716,11 @@ void MainWindow::ShowPreferencesDialog() {
         settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
         settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
         settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
+        settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
+        settings.setValue(QStringLiteral("health/alertEnabled"), healthAlertEnabled_);
     }
     ReevaluateWatcher();
+    ReevaluateHealthRefresh();  // E3:开关变化后重新评估定时器启停。
     SetInfoBar(QStringLiteral("已保存首选项"), 0, 0, QStringLiteral("设置将在下次扫描清理 / 去重时生效"));
 }
 
@@ -7593,7 +7728,9 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     if (healthCardsHost_ == nullptr || row < 0 || row >= static_cast<int>(healthInfos_.size())) {
         return;
     }
-    const core::DiskHealthInfo& info = healthInfos_[row];
+    // 按值拷贝(非引用):详情对话框 exec() 跑独立模态事件循环,会处理排队事件;E3 周期健康刷新的回投
+    // 可能在对话框打开期间覆写 healthInfos_(vector 重分配),引用即悬垂。值拷贝彻底规避。
+    const core::DiskHealthInfo info = healthInfos_[row];
 
     auto statusColor = [](core::DiskHealthStatus status) -> QColor {
         switch (status) {
@@ -7799,8 +7936,8 @@ void MainWindow::ShowHealthDetailDialog(int row) {
     dialog.exec();
 }
 
-void MainWindow::RefreshDiskHealth() {
-    if (healthQuerying_.load() || healthCardsHost_ == nullptr) {
+void MainWindow::RefreshDiskHealth(bool evaluateAlert) {
+    if (healthQuerying_.load() || healthCardsHost_ == nullptr || healthWorkerThread_ == nullptr || healthWorker_ == nullptr) {
         return;
     }
 
@@ -7813,11 +7950,22 @@ void MainWindow::RefreshDiskHealth() {
         healthInfoLabel_->setText(QStringLiteral("磁盘健康 · 正在读取……"));
     }
 
-    std::thread([this]() {
+    // E3:后台 worker 改用 owned QThread(默认运行事件循环),替代原 detached std::thread。
+    // invokeMethod(healthWorker_, ...) 投递到 worker 线程(healthWorker_ 经 moveToThread 亲缘性已转移);
+    // worker lambda 体与原 detached 版完全一致(仅读取 + 回投),仅换 spawn 机制。
+    // 回投前/回投内双重检查 quitting_:关闭窗口时 closeEvent 先置 quitting_ 再 quit()+wait(),
+    // worker 完成 QueryAll 后见 quitting_=true 即不回投 this,杜绝周期触发放大的「关闭时 UAF」。
+    QMetaObject::invokeMethod(healthWorker_, [this, evaluateAlert]() {
         const core::DiskHealth reader;
         std::vector<core::DiskHealthInfo> infos = reader.QueryAll();
-
-        QMetaObject::invokeMethod(this, [this, infos = std::move(infos)]() mutable {
+        if (quitting_.load()) {  // 关闭中:不再回投 this。
+            return;
+        }
+        QMetaObject::invokeMethod(this, [this, infos = std::move(infos), evaluateAlert]() mutable {
+            if (quitting_.load()) {  // 双保险:回投执行瞬间也处于关闭流程则放弃。
+                healthQuerying_.store(false);
+                return;
+            }
             const bool cancelled = healthQueryCancel_.load();
             healthQuerying_.store(false);
             healthQueryCancel_.store(false);
@@ -7827,10 +7975,15 @@ void MainWindow::RefreshDiskHealth() {
                 }
                 return;
             }
+            // E3:先按值拷贝前一快照,再覆盖 healthInfos_,供周期刷新评估状态转换告警(手动刷新 evaluateAlert=false 跳过)。
+            const std::vector<core::DiskHealthInfo> prev = healthInfos_;
             healthInfos_ = std::move(infos);
             PopulateHealthCards(healthInfos_);
+            if (evaluateAlert && healthAlertEnabled_) {
+                EvaluateHealthAlert(prev, healthInfos_);
+            }
         }, Qt::QueuedConnection);
-    }).detach();
+    }, Qt::QueuedConnection);
 }
 
 void MainWindow::CancelDiskHealth() {
@@ -7841,6 +7994,89 @@ void MainWindow::CancelDiskHealth() {
     if (healthStatusLabel_ != nullptr) {
         healthStatusLabel_->setText(QStringLiteral("正在取消……"));
     }
+}
+
+bool MainWindow::IsOnHealthPage() const {
+    if (tabs_ == nullptr || healthPage_ == nullptr) {
+        return false;
+    }
+    return tabs_->currentWidget() == healthPage_;
+}
+
+void MainWindow::ReevaluateHealthRefresh() {
+    if (healthRefreshTimer_ == nullptr) {
+        return;
+    }
+    // 周期健康刷新与目录扫描互不依赖:SMART/NVMe 是物理盘只读 IOCTL,跑在独立 worker 线程,
+    // 不触碰扫描结果树;故不 gate on scanning_(与 ReevaluateWatcher 不同),扫描中亦可刷新。
+    // 仅按开关 + 当前是否在健康页决定定时器启停:在健康页且启用→运行(每 5min 自动刷新);切走/关开关→停。
+    if (healthRefreshEnabled_ && IsOnHealthPage()) {
+        if (!healthRefreshTimer_->isActive()) {
+            healthRefreshTimer_->start();
+        }
+    } else {
+        healthRefreshTimer_->stop();
+    }
+}
+
+void MainWindow::OnHealthRefreshTick() {
+    if (!healthRefreshEnabled_) {
+        return;
+    }
+    if (!IsOnHealthPage()) {
+        return;  // 定时器本应在切走时停止,此处防御性(切走与 tick 的竞态)。
+    }
+    // evaluateAlert=true:仅周期刷新评估状态转换告警;healthQuerying_ 守卫保证与在途读取串行,不并发。
+    RefreshDiskHealth(true);
+}
+
+bool MainWindow::HealthWorsened(const core::DiskHealthInfo& prev, const core::DiskHealthInfo& curr) const {
+    // 任一侧 Unreadable 不可比:瞬时 IOCTL 失败会把盘翻到最高序号 Unreadable,若参与比较会误报"恶化"。
+    if (curr.status == core::DiskHealthStatus::Unreadable || prev.status == core::DiskHealthStatus::Unreadable) {
+        return false;
+    }
+    // DiskHealthStatus 序:Good=0 < Attention=1 < Warning=2 < Unreadable=3,序号增大即恶化。
+    return static_cast<int>(curr.status) > static_cast<int>(prev.status);
+}
+
+void MainWindow::EvaluateHealthAlert(const std::vector<core::DiskHealthInfo>& prev,
+                                     const std::vector<core::DiskHealthInfo>& curr) {
+    if (healthAlertFrame_ == nullptr || healthAlertBodyLabel_ == nullptr) {
+        return;
+    }
+    if (prev.empty()) {
+        return;  // 首次读取只建立基线,不告警(避免一开告警就报"下滑")。
+    }
+    // 按物理盘号匹配前后快照,统计本区间(上一 tick → 本 tick)状态恶化的盘;新出现的盘无前后对比不计。
+    QStringList worsenedDisks;
+    for (const auto& c : curr) {
+        if (c.status == core::DiskHealthStatus::Good) {
+            continue;
+        }
+        const core::DiskHealthInfo* matchedPrev = nullptr;
+        for (const auto& p : prev) {
+            if (p.physicalDriveNumber == c.physicalDriveNumber) {
+                matchedPrev = &p;
+                break;
+            }
+        }
+        if (matchedPrev == nullptr || !HealthWorsened(*matchedPrev, c)) {
+            continue;
+        }
+        QString label = QStringLiteral("物理盘 %1").arg(c.physicalDriveNumber);
+        if (!c.driveLetters.empty()) {
+            label += QStringLiteral("(") + ToQString(c.driveLetters) + QStringLiteral(")");
+        }
+        worsenedDisks << label;
+    }
+    if (worsenedDisks.isEmpty()) {
+        return;  // 本区间无新恶化:不触碰横幅(既有告警保留,由用户点 × 关闭;体现"事件模型")。
+    }
+    healthAlertBodyLabel_->setText(
+        QStringLiteral("检测到 %1 块磁盘健康状态下滑:%2。建议尽快备份重要数据并考虑更换。")
+            .arg(worsenedDisks.size())
+            .arg(worsenedDisks.join(QStringLiteral("、"))));
+    healthAlertFrame_->setVisible(true);
 }
 
 void MainWindow::PopulateHealthCards(const std::vector<disk_lens::core::DiskHealthInfo>& infos) {

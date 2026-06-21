@@ -45,6 +45,7 @@ class QTableWidget;
 class QTableView;
 class QTextEdit;
 class QTimer;
+class QThread;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QWidget;
@@ -155,6 +156,34 @@ private slots:
      * @brief 当前是否处于磁盘分析模块页(精确复刻 UpdateModuleChrome 的 isDiskAnalysisPage 判定)。
      */
     bool IsOnDiskAnalysisPage() const;
+
+    /**
+     * @brief E3:周期健康刷新的仲裁器。据开关 + 当前是否在健康页决定定时器启停。
+     *        与 watcher 不同,健康刷新是物理盘只读 IOCTL,与目录扫描互不依赖,故不 gate on scanning_;
+     *        扫描进行中亦可刷新。切走健康页 / 关开关即停定时器。
+     */
+    void ReevaluateHealthRefresh();
+    /**
+     * @brief E3:周期健康刷新定时器触发。仅当开关开且在健康页时执行一次后台读取(evaluateAlert=true)。
+     */
+    void OnHealthRefreshTick();
+    /**
+     * @brief E3:比较上一 tick 与本 tick 的健康快照,若有磁盘状态恶化则在健康页弹告警横幅。
+     * @param prev 上一快照(本次读取前 healthInfos_ 的值拷贝)。
+     * @param curr 本次快照(healthInfos_ 已更新后的引用)。
+     */
+    void EvaluateHealthAlert(const std::vector<disk_lens::core::DiskHealthInfo>& prev,
+                             const std::vector<disk_lens::core::DiskHealthInfo>& curr);
+    /**
+     * @brief E3:判定单盘健康是否恶化(状态序号上升)。Unreadable 不可比,任一侧为 Unreadable 返回 false,
+     *        避免瞬时 IOCTL 失败把盘翻到最高序号而误报恶化。
+     */
+    bool HealthWorsened(const disk_lens::core::DiskHealthInfo& prev,
+                        const disk_lens::core::DiskHealthInfo& curr) const;
+    /**
+     * @brief E3:当前是否处于健康模块页(tabs_->currentWidget() == healthPage_)。
+     */
+    bool IsOnHealthPage() const;
 
 private:
     /**
@@ -643,8 +672,10 @@ private:
 
     /**
      * @brief 后台读取所有物理盘 SMART/健康信息并填充健康表格。
+     * @param evaluateAlert 是否在读取完成后评估状态转换告警(仅周期定时器触发传 true;
+     *        手动「读取健康信息」按钮 / 卡片右键刷新传默认 false,以免手动操作误触告警)。
      */
-    void RefreshDiskHealth();
+    void RefreshDiskHealth(bool evaluateAlert = false);
 
     /**
      * @brief 用最新健康快照构建每盘一卡的健康信息卡片;清空旧卡片。
@@ -1110,6 +1141,15 @@ private:
     QLabel* healthInfoLabel_ = nullptr;
 
     /**
+     * @brief E3:健康状态转换告警横幅(置于健康页 hero 标题与卡片列表之间,默认隐藏)。
+     */
+    QFrame* healthAlertFrame_ = nullptr;
+    /**
+     * @brief E3:健康告警横幅正文(描述哪些盘状态恶化)。
+     */
+    QLabel* healthAlertBodyLabel_ = nullptr;
+
+    /**
      * @brief 长期未动文件虚拟结果表。
      */
     QTableView* staleFilesView_ = nullptr;
@@ -1562,6 +1602,33 @@ private:
      * @brief 最近一次读取到的物理盘健康快照(供表格刷新/导出复用)。
      */
     std::vector<disk_lens::core::DiskHealthInfo> healthInfos_;
+
+    /**
+     * @brief E3:承载后台健康读取的 worker QObject(已 moveToThread 到 healthWorkerThread_)。
+     *        无父对象(便于跨线程移动);随线程 finished→deleteLater。
+     */
+    QObject* healthWorker_ = nullptr;
+    /**
+     * @brief E3:owned 后台线程(运行事件循环),承载 SMART/NVMe 读取,替代 detached std::thread。
+     *        父对象为 this;关闭时 closeEvent 置 quitting_ + quit()+wait() 严格 join,杜绝「关闭时 UAF」。
+     */
+    QThread* healthWorkerThread_ = nullptr;
+    /**
+     * @brief E3:周期健康刷新定时器(300000ms 重复);仅在开关开且停留在健康页时运行。
+     */
+    QTimer* healthRefreshTimer_ = nullptr;
+    /**
+     * @brief E3:是否启用周期健康刷新(QSettings 键 health/refreshEnabled,默认 false)。
+     */
+    bool healthRefreshEnabled_ = false;
+    /**
+     * @brief E3:是否启用状态转换告警(QSettings 键 health/alertEnabled,默认 false);与刷新开关相互独立。
+     */
+    bool healthAlertEnabled_ = false;
+    /**
+     * @brief E3:主窗口正在关闭标志。置真后 health worker 回投前检查即不再触碰 this,杜绝析构期 UAF。
+     */
+    std::atomic_bool quitting_{false};
 
     /**
      * @brief 长期未动文件表格是否已经为当前扫描结果加载。
