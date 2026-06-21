@@ -747,6 +747,13 @@ private:
     void ShowHealthDetailDialog(int row);
 
     /**
+     * @brief C3:只读文件预览对话框(重复文件双击/右键预览)。按后缀分流:图片→QLabel 像素缩略,
+     *        文本→只读 QTextEdit 行视图(前 256KB),其它/二进制→前 4KB 十六进制 dump。懒读,不引外部 diff 库。
+     * @param path 文件绝对路径。
+     */
+    void ShowFilePreview(const QString& path);
+
+    /**
      * @brief 填充长期未动文件表格（按修改时间最旧排序）。
      */
     void PopulateStaleFilesTable();

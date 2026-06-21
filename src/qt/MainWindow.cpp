@@ -28,6 +28,7 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFile>
 #include <QFileSystemWatcher>
 #include <QFont>
 #include <QFontMetrics>
@@ -38,6 +39,7 @@
 #include <QGridLayout>
 #include <QGuiApplication>
 #include <QScrollArea>
+#include <QSet>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -47,6 +49,10 @@
 #include <QMenuBar>
 #include <QSystemTrayIcon>
 #include <QMessageBox>
+#include <QPixmap>
+#include <QImage>
+#include <QImageReader>
+#include <QTextEdit>
 #include <QMetaObject>
 #include <QPainter>
 #include <QProgressBar>
@@ -2056,11 +2062,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     });
     connect(duplicateTree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
         if (item == nullptr || item->childCount() > 0) {
-            return;  // 组节点不响应双击,仅成员行在资源管理器中定位。
+            return;  // 组节点不响应双击,仅成员行打开只读预览。
         }
         const QString path = item->data(0, Qt::UserRole + 1).toString();
         if (!path.isEmpty()) {
-            RevealPathInExplorer(path);
+            ShowFilePreview(path);  // C3:双击只读预览(图片/文本/十六进制);在资源管理器定位见右键菜单。
         }
     });
     connect(searchView_, &QTableView::doubleClicked, this, [this](const QModelIndex&) {
@@ -7533,6 +7539,8 @@ void MainWindow::ShowDuplicateContextMenu(const QPoint& position) {
     }
     const QString path = item != nullptr ? item->data(0, Qt::UserRole + 1).toString() : QString();
     const std::uint64_t bytes = item != nullptr ? item->data(0, Qt::UserRole + 2).toULongLong() : 0;
+    menu.addAction(QStringLiteral("预览文件"), this, [this, path]() { ShowFilePreview(path); })
+        ->setEnabled(item != nullptr && !path.isEmpty());  // C3:只读预览(与双击同源)。
     AddPathActions(menu, path, true, bytes, true);
     menu.addSeparator();
     QAction* toggleAction = menu.addAction(QStringLiteral("勾选/取消勾选"), this, [item]() {
@@ -7979,6 +7987,176 @@ void MainWindow::ShowPreferencesDialog() {
     ReevaluateHealthRefresh();  // E3:开关变化后重新评估定时器启停。
     ReevaluatePeriodicRescan();  // E4:开关变化后重新评估周期重扫定时器。
     SetInfoBar(QStringLiteral("已保存首选项"), 0, 0, QStringLiteral("设置将在下次扫描清理 / 去重时生效"));
+}
+
+void MainWindow::ShowFilePreview(const QString& path) {
+    // C3:只读文件预览。按后缀分流(图片/文本/二进制),懒读(图片用 QImageReader 先读头部尺寸按像素
+    // 维度界定解码成本 + 显式 allocationLimit,文本前 256KB,二进制前 4KB),不引外部库。重复文件哈希
+    // 相同故内容一致,预览单个即代表整组。全部同步调用在本地文件上(网络路径已在顶部拦截)。
+    if (path.isEmpty()) {
+        return;
+    }
+    // 网络路径(UNC \\server\share 或 //)的打开/读/stat 是同步阻塞且无超时:挂起的 SMB 重定向器
+    // 会把 UI 线程冻结数秒乃至无界(PARAMOUNT:预览绝不能冻结界面)。本工具本地优先,网络路径直接
+    // 给提示而非阻塞打开。须在任何 QFileInfo 阻塞调用(info.exists/isFile/size)之前判断。
+    if (path.startsWith(QStringLiteral("\\\\")) || path.startsWith(QStringLiteral("//"))) {
+        QMessageBox::warning(this, QStringLiteral("预览"),
+                             QStringLiteral("网络路径暂不支持预览(避免阻塞界面):\n%1").arg(path));
+        return;
+    }
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        QMessageBox::warning(this, QStringLiteral("预览"),
+                             QStringLiteral("文件不存在或无法访问:\n%1").arg(path));
+        return;
+    }
+    const QString suffix = info.suffix().toLower();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("预览 · %1").arg(info.fileName()));
+    dialog.setWindowIcon(windowIcon());
+    dialog.resize(760, 560);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    // 顶部路径条(可选中复制)。
+    auto* pathLabel = new QLabel(QDir::toNativeSeparators(path), &dialog);
+    pathLabel->setObjectName(QStringLiteral("EmptyStateHint"));
+    pathLabel->setWordWrap(true);
+    pathLabel->setContentsMargins(16, 10, 16, 10);
+    pathLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(pathLabel);
+
+    // 静态图片后缀集(只取 Qt 内建支持、无需图片插件的常见格式)。
+    static const QSet<QString> imageSuffixes = {
+        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+        QStringLiteral("bmp"), QStringLiteral("gif"), QStringLiteral("webp"),
+        QStringLiteral("ico"), QStringLiteral("jfif")
+    };
+    // 文本类后缀集(按行渲染;二进制/未知走十六进制)。
+    static const QSet<QString> textSuffixes = {
+        QStringLiteral("txt"), QStringLiteral("log"), QStringLiteral("csv"), QStringLiteral("tsv"),
+        QStringLiteral("json"), QStringLiteral("xml"), QStringLiteral("html"), QStringLiteral("htm"),
+        QStringLiteral("md"), QStringLiteral("ini"), QStringLiteral("conf"), QStringLiteral("cfg"),
+        QStringLiteral("properties"), QStringLiteral("yml"), QStringLiteral("yaml"),
+        QStringLiteral("c"), QStringLiteral("h"), QStringLiteral("cpp"), QStringLiteral("hpp"),
+        QStringLiteral("cc"), QStringLiteral("cs"), QStringLiteral("java"), QStringLiteral("py"),
+        QStringLiteral("rs"), QStringLiteral("go"), QStringLiteral("js"), QStringLiteral("ts"),
+        QStringLiteral("php"), QStringLiteral("rb"), QStringLiteral("sh"), QStringLiteral("bat"),
+        QStringLiteral("ps1"), QStringLiteral("sql"), QStringLiteral("css"), QStringLiteral("scss"),
+        QStringLiteral("vue"), QStringLiteral("gradle"), QStringLiteral("mak")
+    };
+
+    const qint64 fileSize = info.size();
+    const bool isImage = imageSuffixes.contains(suffix);
+    const bool isText = textSuffixes.contains(suffix);
+
+    if (isImage) {
+        // 图片:大文件(>64MB)避免一次解码耗尽内存,降级为提示。
+        auto* scroll = new QScrollArea(&dialog);
+        scroll->setAlignment(Qt::AlignCenter);
+        scroll->setWidgetResizable(true);
+        auto* imageLabel = new QLabel(scroll);
+        imageLabel->setAlignment(Qt::AlignCenter);
+        if (fileSize > 64LL * 1024 * 1024) {
+            // 文件本体过大:连头部探测都跳过,直接提示。
+            imageLabel->setText(QStringLiteral("图片过大(>%1 MB),为节省内存不内联预览。")
+                                    .arg(fileSize / (1024 * 1024)));
+        } else {
+            // 用 QImageReader 先读头部尺寸(廉价,不解码全图),按像素维度界定解码成本——文件体积门限
+            // 挡不住「磁盘小但解码极慢/极占内存」的病态图片(如近千兆像素 BMP),同步全量解码会把
+            // UI 冻结数秒。此处按 width*height*4(RGBA 上界)设像素预算 + 显式 allocationLimit 双保险。
+            QImageReader reader(path);
+            reader.setAutoDetectImageFormat(true);
+            const QSize imgSize = reader.size();  // 仅读头部,不解码像素。
+            static constexpr qint64 kPixelBudgetBytes = 64LL * 1024 * 1024;  // ~4096x4096 RGBA。
+            const qint64 decodedBytes = imgSize.isValid()
+                ? (qint64(imgSize.width()) * qint64(imgSize.height()) * 4)
+                : -1;
+            if (decodedBytes > kPixelBudgetBytes) {
+                imageLabel->setText(QStringLiteral("图片过大(%1×%2 像素),为节省内存不内联预览。")
+                                        .arg(imgSize.width()).arg(imgSize.height()));
+            } else {
+                reader.setAllocationLimit(static_cast<int>(kPixelBudgetBytes / (1024 * 1024)));  // 64 MB 像素上限。
+                const QImage img = reader.read();
+                if (img.isNull()) {
+                    imageLabel->setText(QStringLiteral("无法解码图片(可能损坏或格式不受支持)。"));
+                } else {
+                    // 原图不缩放存于 QLabel,滚动浏览(像素已由预算门限保证有限)。
+                    const QPixmap pix = QPixmap::fromImage(img);
+                    imageLabel->setPixmap(pix);
+                    imageLabel->setMinimumSize(pix.size());
+                }
+            }
+        }
+        scroll->setWidget(imageLabel);
+        layout->addWidget(scroll, 1);
+    } else {
+        // 文本 / 十六进制:统一只读 QTextEdit(等宽字体),懒读前若干字节。
+        auto* view = new QTextEdit(&dialog);
+        view->setReadOnly(true);
+        view->setFont(QFont(QStringLiteral("Consolas"), 9));
+        const qint64 cap = isText ? (256LL * 1024) : (4LL * 1024);
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            view->setPlainText(QStringLiteral("无法打开文件:\n%1").arg(file.errorString()));
+        } else if (fileSize == 0) {
+            view->setPlainText(QStringLiteral("(空文件)"));
+        } else {
+            const QByteArray raw = file.read(cap);
+            file.close();
+            if (isText) {
+                QString text = QString::fromUtf8(raw);  // 非法字节替换为 U+FFFD,不崩溃。
+                if (fileSize > cap) {
+                    text += QStringLiteral("\n\n(已截断:仅显示前 %1 KB / 共 %2 KB)")
+                                .arg(cap / 1024)
+                                .arg(fileSize / 1024);
+                }
+                view->setPlainText(text);
+            } else {
+                // 手搓十六进制 dump:偏移 | 16 字节十六进制 | ASCII。
+                QString hex;
+                const int rows = (raw.size() + 15) / 16;
+                for (int r = 0; r < rows; ++r) {
+                    QString hexPart;
+                    QString ascPart;
+                    for (int c = 0; c < 16; ++c) {
+                        const int idx = r * 16 + c;
+                        if (idx < raw.size()) {
+                            const unsigned char b = static_cast<unsigned char>(raw[idx]);
+                            hexPart += QStringLiteral("%1 ").arg(b, 2, 16, QChar('0'));
+                            ascPart += (b >= 32 && b < 127) ? QChar::fromLatin1(b) : QChar('.');
+                        } else {
+                            hexPart += QStringLiteral("   ");
+                        }
+                    }
+                    hex += QStringLiteral("%1  %2 %3\n")
+                               .arg(r * 16, 8, 16, QChar('0'))
+                               .arg(hexPart)
+                               .arg(ascPart);
+                }
+                if (fileSize > cap) {
+                    hex += QStringLiteral("\n(仅显示前 %1 KB / 共 %2 KB)").arg(cap / 1024).arg(fileSize / 1024);
+                }
+                view->setPlainText(hex);
+            }
+        }
+        layout->addWidget(view, 1);
+    }
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    buttons->button(QDialogButtonBox::Close)->setText(QStringLiteral("关闭"));
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto* buttonRow = new QHBoxLayout();
+    buttonRow->setContentsMargins(16, 8, 16, 12);
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(buttons);
+    layout->addLayout(buttonRow);
+
+    ApplyNativeWindowIcon(&dialog);
+    QTimer::singleShot(0, &dialog, [&dialog]() { ApplyNativeWindowIcon(&dialog); });
+    dialog.exec();
 }
 
 void MainWindow::ShowHealthDetailDialog(int row) {
