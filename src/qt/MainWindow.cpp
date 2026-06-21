@@ -1952,6 +1952,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
     healthRefreshTimer_->setSingleShot(false);
     healthRefreshTimer_->setInterval(300000);  // 5 分钟重复。
     connect(healthRefreshTimer_, &QTimer::timeout, this, &MainWindow::OnHealthRefreshTick);
+    // E4 周期重扫:补 watcher 盲区(深路径/网络/Qt 静默跳过的目录),每 15 分钟对 watchedRootPath_ 重扫一次。
+    // 仅在 live-watching 开启且本开关开启等条件满足时运行;扫描中/冷却中 tick 跳过,下个 tick 再试。
+    periodicRescanTimer_ = new QTimer(this);
+    periodicRescanTimer_->setSingleShot(false);
+    periodicRescanTimer_->setInterval(900000);  // 15 分钟重复(路线图最小间隔)。
+    connect(periodicRescanTimer_, &QTimer::timeout, this, &MainWindow::OnPeriodicRescanTick);
 
     InstallShortcuts();
 
@@ -2288,6 +2294,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     quitting_.store(true);
     if (healthRefreshTimer_ != nullptr) {
         healthRefreshTimer_->stop();
+    }
+    if (periodicRescanTimer_ != nullptr) {  // E4:停周期重扫定时器。
+        periodicRescanTimer_->stop();
     }
     CancelDiskHealth();  // 置 healthQueryCancel_(信息性,配合 quitting_ 守卫;QueryAll 内部不可取消,靠回投前守卫兜底)。
     if (healthWorkerThread_ != nullptr) {
@@ -3232,6 +3241,7 @@ void MainWindow::LoadLastScanCacheAsync() {
             // E2:恢复缓存结果非新扫描,无耗时基线;给 30s 冷却避免恢复后外部搅动立刻触发重扫。
             watcherCooldownUntilMsec_ = QDateTime::currentMSecsSinceEpoch() + 30000;
             ReevaluateWatcher();  // E2:启动恢复缓存后,若已启用则按该根 arm watcher。
+            ReevaluatePeriodicRescan();  // E4:恢复缓存后,若 live-watching + 本开关开启则按该根起周期重扫。
         }, Qt::QueuedConnection);
     }).detach();
 }
@@ -3295,6 +3305,9 @@ void MainWindow::LoadUiSettings() {
 
     // E2:实时文件夹监控开关,默认关闭(未设置过的用户行为零变化)。
     liveWatchEnabled_ = settings.value(QStringLiteral("watch/liveEnabled"), false).toBool();
+
+    // E4:周期重扫开关,默认关闭(仅当 live-watching 开启时生效)。
+    periodicRescanEnabled_ = settings.value(QStringLiteral("watch/periodicRescan"), false).toBool();
 
     // E3:周期健康刷新 / 状态转换告警开关,均默认关闭(未设置过的用户行为零变化)。
     // 不在此处调 ReevaluateHealthRefresh——此时 1925 的定时器尚未构造,且启动页非健康页,定时器本就该停。
@@ -3367,6 +3380,9 @@ void MainWindow::SaveUiSettings() const {
 
     // E2 实时文件夹监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
     settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
+
+    // E4 周期重扫开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
+    settings.setValue(QStringLiteral("watch/periodicRescan"), periodicRescanEnabled_);
 
     // E3 健康监控开关(与 LoadUiSettings / 首选项对话框 accept 三处对称)。
     settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
@@ -4877,6 +4893,7 @@ void MainWindow::UpdateModuleChrome() {
 
     ReevaluateWatcher();
     ReevaluateHealthRefresh();  // E3:模块/标签页切换后重新评估健康刷新定时器启停(切到健康页才运行)。
+    ReevaluatePeriodicRescan();  // E4:切到磁盘分析页且 live-watching 开启时才运行周期重扫。
 }
 
 bool MainWindow::IsOnDiskAnalysisPage() const {
@@ -6413,6 +6430,7 @@ void MainWindow::HandleScanFinished() {
         watcherCooldownUntilMsec_ = QDateTime::currentMSecsSinceEpoch() + qMax(qint64(30000), clampedScanMs * 2);
     }
     ReevaluateWatcher();
+    ReevaluatePeriodicRescan();  // E4:扫完按新根重新评估周期重扫定时器。
 }
 
 void MainWindow::EvaluateGrowthAlert() {
@@ -7628,9 +7646,13 @@ void MainWindow::ShowPreferencesDialog() {
     auto* liveWatchHint = new QLabel(QStringLiteral("仅监控扫描根目录及其一级子目录；裸盘根目录（如 C:\\）不启用，以避免频繁全盘重扫；网络路径 / 深路径为尽力而为（Qt 已知局限）。"), autoPage);
     liveWatchHint->setWordWrap(true);
     liveWatchHint->setObjectName(QStringLiteral("EmptyStateHint"));
+    // E4 周期重扫:补 watcher 盲区(深路径/网络/Qt 静默跳过的目录),每 15 分钟对扫描根重扫一次;仅在实时监控开启时生效。
+    auto* periodicRescanBox = new QCheckBox(QStringLiteral("定时重扫补盲（开启实时监控后，每 15 分钟重扫一次扫描根，默认关闭）"), autoPage);
+    periodicRescanBox->setChecked(periodicRescanEnabled_);
     autoLayout->addWidget(autoCaption);
     autoLayout->addWidget(liveWatchBox);
     autoLayout->addWidget(liveWatchHint);
+    autoLayout->addWidget(periodicRescanBox);
     autoLayout->addStretch(1);
     tabs->addTab(autoPage, QStringLiteral("实时监控"));
 
@@ -7704,6 +7726,9 @@ void MainWindow::ShowPreferencesDialog() {
     // 实时监控开关写回成员(E2),立即生效。
     liveWatchEnabled_ = liveWatchBox->isChecked();
 
+    // E4 周期重扫开关写回成员(仅当实时监控开启时生效),立即生效。
+    periodicRescanEnabled_ = periodicRescanBox->isChecked();
+
     // E3 健康监控两个独立开关写回成员,立即生效。
     healthRefreshEnabled_ = healthRefreshBox->isChecked();
     healthAlertEnabled_ = healthAlertBox->isChecked();
@@ -7716,11 +7741,13 @@ void MainWindow::ShowPreferencesDialog() {
         settings.setValue(QStringLiteral("cleanup/deepClean"), cleanupDeepCleanCheckBox_ != nullptr && cleanupDeepCleanCheckBox_->isChecked());
         settings.setValue(QStringLiteral("dedup/permanentDelete"), duplicatePermanentCheckBox_ != nullptr && duplicatePermanentCheckBox_->isChecked());
         settings.setValue(QStringLiteral("watch/liveEnabled"), liveWatchEnabled_);
+        settings.setValue(QStringLiteral("watch/periodicRescan"), periodicRescanEnabled_);
         settings.setValue(QStringLiteral("health/refreshEnabled"), healthRefreshEnabled_);
         settings.setValue(QStringLiteral("health/alertEnabled"), healthAlertEnabled_);
     }
     ReevaluateWatcher();
     ReevaluateHealthRefresh();  // E3:开关变化后重新评估定时器启停。
+    ReevaluatePeriodicRescan();  // E4:开关变化后重新评估周期重扫定时器。
     SetInfoBar(QStringLiteral("已保存首选项"), 0, 0, QStringLiteral("设置将在下次扫描清理 / 去重时生效"));
 }
 
@@ -8028,6 +8055,47 @@ void MainWindow::OnHealthRefreshTick() {
     }
     // evaluateAlert=true:仅周期刷新评估状态转换告警;healthQuerying_ 守卫保证与在途读取串行,不并发。
     RefreshDiskHealth(true);
+}
+
+void MainWindow::ReevaluatePeriodicRescan() {
+    if (periodicRescanTimer_ == nullptr) {
+        return;
+    }
+    // 仅当 live-watching 已开启(E4 是 watcher 的补盲)、本开关开启、在磁盘分析页且有新鲜结果时运行。
+    // 不 gate on scanning_:扫描中 tick 自行跳过(下个 15min 再试),定时器启停无害。
+    const bool active = liveWatchEnabled_ &&
+                        periodicRescanEnabled_ &&
+                        IsOnDiskAnalysisPage() &&
+                        latestResult_ != nullptr &&
+                        latestResult_->root != nullptr;
+    if (active) {
+        if (!periodicRescanTimer_->isActive()) {
+            periodicRescanTimer_->start();
+        }
+    } else {
+        periodicRescanTimer_->stop();
+    }
+}
+
+void MainWindow::OnPeriodicRescanTick() {
+    // 前置条件全满足才重扫;任一不满足直接跳过(15min 粗粒度,跳过等下个 tick 即可,无需紧凑重排)。
+    if (!liveWatchEnabled_ || !periodicRescanEnabled_) {
+        return;
+    }
+    if (!IsOnDiskAnalysisPage()) {
+        return;
+    }
+    if (watchedRootPath_.isEmpty()) {
+        return;  // watcher 未 arm(裸盘根/无结果),E4 同样不扫,避免全盘 MFT 重扫循环。
+    }
+    if (scanning_.load()) {
+        return;  // 扫描进行中:下个 15min tick 再试(scanning_ 由完成 lambda 在 UI 线程清零)。
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now < watcherCooldownUntilMsec_) {
+        return;  // 冷却中(复用 watcher 冷却窗口):下个 tick 再试。
+    }
+    RescanPath(watchedRootPath_);
 }
 
 bool MainWindow::HealthWorsened(const core::DiskHealthInfo& prev, const core::DiskHealthInfo& curr) const {

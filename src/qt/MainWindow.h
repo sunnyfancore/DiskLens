@@ -185,6 +185,17 @@ private slots:
      */
     bool IsOnHealthPage() const;
 
+    /**
+     * @brief E4:周期重扫的仲裁器。仅当 live-watching 已开启、本开关开启、在磁盘分析页且有新鲜结果时
+     *           运行定时器(补 watcher 盲区)。扫描进行中由 tick 跳过(下个 15min 再试),不在此 gate。
+     */
+    void ReevaluatePeriodicRescan();
+    /**
+     * @brief E4:周期重扫定时器触发。在各前置条件(live-watching/本开关/磁盘分析页/非裸盘根/非扫描中/未冷却)
+     *           满足时 RescanPath 重扫 watchedRootPath_;否则跳过等下个 tick。
+     */
+    void OnPeriodicRescanTick();
+
 private:
     /**
      * @brief 快速搜索索引记录的前置声明。
@@ -1238,6 +1249,14 @@ private:
      * @brief watcher 重扫冷却上限(epoch ms);防外部搅动导致的稳态重扫循环。
      */
     qint64 watcherCooldownUntilMsec_ = 0;
+    /**
+     * @brief E4:周期重扫定时器(900000ms 重复,补 watcher 盲区);仅在 live-watching 开启且本开关开启等条件满足时运行。
+     */
+    QTimer* periodicRescanTimer_ = nullptr;
+    /**
+     * @brief E4:是否启用周期重扫(QSettings 键 watch/periodicRescan,默认 false);仅当 liveWatchEnabled_ 亦开启时生效。
+     */
+    bool periodicRescanEnabled_ = false;
 
     /**
      * @brief 快速搜索结果表格。
