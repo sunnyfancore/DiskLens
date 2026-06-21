@@ -138,24 +138,18 @@ std::wstring SmartAttributeName(int id) {
 }
 
 /**
- * @brief 打开物理盘句柄;先用读写权限(ATA 直读需要),失败再回退只读。
+ * @brief 打开物理盘句柄。
+ * @param writable 为真时请求读写权限(IOCTL_ATA_PASS_THROUGH 的 SATA SMART 直读需要);默认只读——
+ *        NVMe(STORAGE_QUERY_PROPERTY)、磁盘容量/型号等只读查询本就无需写权限。默认只读可避免对每块
+ *        物理盘都创建写句柄:杀软启发式把"未签名 + requireAdministrator + 裸盘 CreateFileW 写权限 +
+ *        海量枚举"叠加视为勒索/擦盘特征,读写句柄现仅在 SATA 健康直读被拒时按需重开(见 QueryAll)。
  */
-HANDLE OpenPhysicalDrive(int diskNumber) {
+HANDLE OpenPhysicalDrive(int diskNumber, bool writable = false) {
     const std::wstring path = L"\\\\.\\PhysicalDrive" + std::to_wstring(diskNumber);
+    const DWORD access = writable ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
     HANDLE handle = CreateFileW(
         path.c_str(),
-        GENERIC_READ | GENERIC_WRITE,
-        FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr,
-        OPEN_EXISTING,
-        0,
-        nullptr);
-    if (handle != INVALID_HANDLE_VALUE) {
-        return handle;
-    }
-    handle = CreateFileW(
-        path.c_str(),
-        GENERIC_READ,
+        access,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
         OPEN_EXISTING,
@@ -401,8 +395,11 @@ void ParseAtaSmartAttributes(const unsigned char* data, DiskHealthInfo& info) {
 
 /**
  * @brief 通过 IOCTL_ATA_PASS_THROUGH 发 SMART READ DATA(0xB0/D0),解析关键属性。
+ * @return DeviceIoControl 的错误码(成功为 0)。注意:ERR 位置位或返回空数据属"盘级"问题
+ *         (IOCTL 本身成功),仍返回 0;唯有 IOCTL 调用失败(如只读句柄被拒 ERROR_ACCESS_DENIED)
+ *         才返回非零,供调用方据此换读写句柄重试。
  */
-void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
+DWORD QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     struct AtaPassThroughRequest {
         ATA_PASS_THROUGH_EX apt;
         unsigned char data[512];
@@ -428,7 +425,7 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     if (!DeviceIoControl(handle, IOCTL_ATA_PASS_THROUGH, &request, sizeof(request), &request, sizeof(request), &returned, nullptr)) {
         const DWORD err = GetLastError();
         info.note = L"ATA SMART 直读失败(错误码 " + std::to_wstring(err) + L")";
-        return;
+        return err;  // 调用方据此在只读句柄被拒(ERROR_ACCESS_DENIED)时换读写句柄重试。
     }
     // DeviceIoControl 成功后,寄存器被驱动回填:CurrentTaskFile[6] 为状态寄存器,位 0(0x01)= ERR。
     const unsigned char statusReg = request.apt.CurrentTaskFile[6];
@@ -437,7 +434,7 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
         const unsigned char errorReg = request.apt.CurrentTaskFile[0];
         info.note = L"ATA SMART 命令返回错误(状态 0x" + ByteToHex(statusReg) +
                     L" · 错误 0x" + ByteToHex(errorReg) + L")";
-        return;
+        return 0;  // IOCTL 本身成功,是盘级错误,换读写句柄重试无意义。
     }
     // 不再用 returned 严格校验:部分存储驱动对 ATA 直通少报返回字节数(returned 可能 < 结构+512),
     // 但数据已实际写入缓冲;改为判缓冲是否非全零,避免误把有效数据当"不完整"丢弃。
@@ -450,7 +447,7 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
     }
     if (!anyNonZero) {
         info.note = L"ATA SMART 返回空数据(returned=" + std::to_wstring(returned) + L")";
-        return;
+        return 0;  // IOCTL 成功但数据空,换读写句柄重试无意义。
     }
 
     ParseAtaSmartAttributes(request.data, info);
@@ -476,6 +473,7 @@ void QueryAtaSmart(HANDLE handle, DiskHealthInfo& info) {
         info.healthPercent = 100;
     }
     info.note = L"ATA SMART 属性";
+    return 0;
 }
 
 /**
@@ -604,7 +602,21 @@ std::vector<DiskHealthInfo> DiskHealth::QueryAll() const {
         } else {
             // SATA/ATA/ATAPI,以及 SAS/RAID/虚拟盘等非常规总线,统一尝试 ATA SMART 直读;
             // 不支持直通的盘会在此逐盘降级为不可读取,不影响其它盘。
-            QueryAtaSmart(handle, info);
+            const DWORD ataErr = QueryAtaSmart(handle, info);
+            if (ataErr == ERROR_ACCESS_DENIED) {
+                // MS 文档要求 IOCTL_ATA_PASS_THROUGH 的句柄带 GENERIC_READ|GENERIC_WRITE。上方默认只开
+                // 只读句柄(NVMe/USB 等只读查询无需写,也避免无谓的"写物理盘"特征);仅当该 SATA 盘只读直读
+                // 被拒时,才为其单独开一个读写句柄重试一次,用完即关——SATA 行为与改动前完全一致,而 NVMe
+                // 等其它盘不再创建任何写句柄,从而降低杀软对"写裸盘"的启发式权重。
+                info.note.clear();  // 先清掉只读被拒的诊断:下面无论重试成功(设"ATA SMART 属性")、盘级失败(设新诊断)、还是无法提权(下行),note 都会重写。
+                HANDLE rwHandle = OpenPhysicalDrive(diskNumber, true);
+                if (rwHandle != INVALID_HANDLE_VALUE) {
+                    QueryAtaSmart(rwHandle, info);
+                    CloseHandle(rwHandle);
+                } else {
+                    info.note = L"ATA SMART 直读需要读写权限,但提权后仍无法打开";
+                }
+            }
             if (info.status == DiskHealthStatus::Unreadable) {
                 info.note += L" · 总线类型 " + std::to_wstring(static_cast<int>(busType));
             }

@@ -35,6 +35,8 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "CompanyName", "SunnyFan"
+            VALUE "LegalCopyright", "Copyright (C) 2026 SunnyFan. 保留所有权利。"
+            VALUE "Comments", "本地磁盘分析工具(空间占用/重复文件/磁盘健康),便携、隐私、无需联网。"
             VALUE "FileDescription", "磁盘洞察"
             VALUE "FileVersion", "@DiskLens_VERSION_MAJOR@.@DiskLens_VERSION_MINOR@.@DiskLens_VERSION_PATCH@"
             VALUE "InternalName", "磁盘洞察"
