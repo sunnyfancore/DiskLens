@@ -64,6 +64,8 @@ if (BUILD_QT_UI)
         src/qt/main.cpp
         src/qt/AppIcons.cpp
         src/qt/MainWindow.cpp
+        src/qt/TableExport.cpp
+        src/qt/HeadlessCli.cpp
         src/qt/ResultTableModel.cpp
         src/qt/TreemapWidget.cpp
         src/qt/CategoryDonutWidget.cpp

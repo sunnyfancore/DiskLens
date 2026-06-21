@@ -7,6 +7,7 @@
 #include "core/Format.h"
 #include "core/LongPath.h"
 #include "qt/AppIcons.h"
+#include "qt/TableExport.h"
 #include "Version.h"
 
 #include <QAction>
@@ -709,91 +710,6 @@ QString SanitizeSettingsKey(const QString& path) {
         out += ch.isLetterOrNumber() ? ch : QLatin1Char('_');
     }
     return out.isEmpty() ? QStringLiteral("root") : out;
-}
-
-/**
- * @brief 将文本转义为 CSV 字段。
- * @param value 原始文本。
- * @return CSV 字段。
- */
-QString EscapeCsv(const QString& value) {
-    QString escaped = value;
-    escaped.replace(QStringLiteral("\""), QStringLiteral("\"\""));
-    return QStringLiteral("\"%1\"").arg(escaped);
-}
-
-/**
- * @brief 转义 HTML 文本（& < > " '）。
- * @param value 原始文本。
- * @return HTML 安全文本。
- */
-QString EscapeHtml(const QString& value) {
-    QString escaped = value;
-    escaped.replace(QStringLiteral("&"), QStringLiteral("&amp;"));
-    escaped.replace(QStringLiteral("<"), QStringLiteral("&lt;"));
-    escaped.replace(QStringLiteral(">"), QStringLiteral("&gt;"));
-    escaped.replace(QStringLiteral("\""), QStringLiteral("&quot;"));
-    escaped.replace(QStringLiteral("'"), QStringLiteral("&#39;"));
-    return escaped;
-}
-
-/**
- * @brief 把表头与行渲染为 CSV 文本（含表头行）。
- * @param headers 表头。
- * @param rows 数据行（每行一组原始单元格）。
- * @return CSV 文本（不含 BOM）。
- */
-QString RenderCsvRows(const QStringList& headers, const QVector<QStringList>& rows) {
-    QStringList headerCells;
-    headerCells.reserve(headers.size());
-    for (const QString& header : headers) {
-        headerCells << EscapeCsv(header);
-    }
-    QString out = headerCells.join(QStringLiteral(",")) + QStringLiteral("\n");
-    for (const QStringList& row : rows) {
-        QStringList cells;
-        cells.reserve(row.size());
-        for (const QString& cell : row) {
-            cells << EscapeCsv(cell);
-        }
-        out += cells.join(QStringLiteral(",")) + QStringLiteral("\n");
-    }
-    return out;
-}
-
-/**
- * @brief 把表头与行渲染为带内联样式的 HTML 报表。
- * @param title 报表标题。
- * @param headers 表头。
- * @param rows 数据行。
- * @return 完整 HTML 文档（UTF-8，不含 BOM）。
- */
-QString RenderHtmlTable(const QString& title, const QStringList& headers, const QVector<QStringList>& rows) {
-    QString out;
-    out += QStringLiteral("<!DOCTYPE html><html><head><meta charset=\"utf-8\">");
-    out += QStringLiteral("<title>") + EscapeHtml(title) + QStringLiteral("</title>");
-    out += QStringLiteral("<style>");
-    out += QStringLiteral("body{font-family:'Microsoft YaHei','Segoe UI',Arial,sans-serif;margin:24px;color:#222;}");
-    out += QStringLiteral("h1{font-size:18px;margin:0 0 12px;}");
-    out += QStringLiteral("table{border-collapse:collapse;width:100%;font-size:13px;}");
-    out += QStringLiteral("th,td{border:1px solid #ddd;padding:6px 10px;text-align:left;vertical-align:top;}");
-    out += QStringLiteral("th{background:#2c3e50;color:#fff;}");
-    out += QStringLiteral("tr:nth-child(even){background:#f6f8fa;}");
-    out += QStringLiteral("</style></head><body><h1>") + EscapeHtml(title) + QStringLiteral("</h1>");
-    out += QStringLiteral("<table><thead><tr>");
-    for (const QString& header : headers) {
-        out += QStringLiteral("<th>") + EscapeHtml(header) + QStringLiteral("</th>");
-    }
-    out += QStringLiteral("</tr></thead><tbody>");
-    for (const QStringList& row : rows) {
-        out += QStringLiteral("<tr>");
-        for (const QString& cell : row) {
-            out += QStringLiteral("<td>") + EscapeHtml(cell) + QStringLiteral("</td>");
-        }
-        out += QStringLiteral("</tr>");
-    }
-    out += QStringLiteral("</tbody></table></body></html>");
-    return out;
 }
 
 /**
@@ -10815,11 +10731,9 @@ void MainWindow::ExportCurrentTable() {
         }
     }
 
-    std::wofstream file(path.toStdWString(), std::ios::binary);
-    file.imbue(std::locale(".UTF-8"));
-    file << L"\xfeff";
     const QString title = QStringLiteral("磁盘洞察 分析结果（%1 项）").arg(rows.size());
-    file << (asHtml ? RenderHtmlTable(title, headers, rows) : RenderCsvRows(headers, rows)).toStdWString();
+    // GUI 与 CLI 无头导出共用 WriteTableReport（UTF-8 BOM + 转义 + 渲染统一在此）。
+    WriteTableReport(path, title, headers, rows, asHtml);
 
     if (exportingSearch) {
         if (searchScopeLabel_ != nullptr) {
