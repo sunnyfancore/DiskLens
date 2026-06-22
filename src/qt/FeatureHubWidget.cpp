@@ -1303,8 +1303,21 @@ bool LooksSensitiveFile(const QFileInfo& info) {
     if (sensitiveSuffixes.contains(suffix)) {
         return true;
     }
+    // OpenSSH 私钥无扩展名(id_rsa / id_ecdsa / id_ed25519 / id_dsa),公钥为 .pub 不敏感。
+    // 仅当非 .pub 时按名命中,避免把 id_rsa.pub 等公钥误报为敏感(原 id_rsa 在通用 needle 清单内会误命中 .pub)。
+    static const QStringList sshPrivateKeyNames{
+        QStringLiteral("id_rsa"), QStringLiteral("id_ecdsa"),
+        QStringLiteral("id_ed25519"), QStringLiteral("id_dsa")
+    };
+    if (suffix != QStringLiteral("pub")) {
+        for (const QString& needle : sshPrivateKeyNames) {
+            if (name.contains(needle)) {
+                return true;
+            }
+        }
+    }
     const QStringList needles{
-        QStringLiteral("id_rsa"), QStringLiteral("password"), QStringLiteral("passwd"), QStringLiteral("secret"),
+        QStringLiteral("password"), QStringLiteral("passwd"), QStringLiteral("secret"),
         QStringLiteral("token"), QStringLiteral("credential"), QStringLiteral("密码"), QStringLiteral("身份证"),
         QStringLiteral("合同"), QStringLiteral("私钥"), QStringLiteral("证书")
     };
@@ -1323,9 +1336,16 @@ bool LooksSensitiveFile(const QFileInfo& info) {
  */
 void ScanPrivacyRadar(QVector<FeatureFinding>& out, const QString& sourcePath, std::shared_ptr<std::atomic_bool> cancelFlag) {
     QStringList roots = ImportantUserFolders();
+    // 凭证目录:其存在本身即暗示密钥/凭证。原仅扫桌面/文档/图片/视频,漏 ~/.ssh 等最典型的私钥位置
+    // (id_rsa needle 因 .ssh 未被遍历而成死代码)。补扫兑现"发现密钥"承诺;ExistingPaths 过滤不存在的目录。
+    const QString home = QDir::homePath();
+    roots << home + QStringLiteral("/.ssh");
+    roots << home + QStringLiteral("/.aws");
+    roots << home + QStringLiteral("/.gnupg");
     if (PathExists(sourcePath)) {
         roots << sourcePath;
     }
+    roots.removeDuplicates();
     for (const QString& root : ExistingPaths(roots)) {
         if (IsCancelled(cancelFlag)) {
             break;
@@ -1341,7 +1361,7 @@ void ScanPrivacyRadar(QVector<FeatureFinding>& out, const QString& sourcePath, s
                 continue;
             }
             AddFinding(out, FeatureModule::PrivacyRadar, info.fileName(), QStringLiteral("敏感文件"),
-                       QStringLiteral("建议确认是否应放在同步盘、下载目录或公开项目中。"),
+                       QStringLiteral("建议确认存放位置是否安全（避免随同步盘、备份或公开项目外泄）。"),
                        info.absoluteFilePath(), static_cast<std::uint64_t>(std::max<qint64>(0, info.size())));
             ++emitted;
         }
