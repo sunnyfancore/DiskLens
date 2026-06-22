@@ -177,7 +177,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::SoftwareFootprint, QStringLiteral("软件体积管理器"), QStringLiteral("估算已安装软件及安装目录真实占用")},
         {FeatureModule::AppMover, QStringLiteral("应用 / 游戏搬家"), QStringLiteral("识别适合迁移到目标盘的大型应用和游戏")},
         {FeatureModule::ArchiveAssistant, QStringLiteral("归档助手"), QStringLiteral("为长期未动资料生成迁移归档计划")},
-        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型整理下载、桌面和聊天接收文件")},
+        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型整理下载和桌面文件（可在源路径追加目录）")},
         {FeatureModule::PrivacyRadar, QStringLiteral("隐私文件雷达"), QStringLiteral("发现密钥、证书、合同和身份信息等敏感文件")},
         {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"), QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境")},
         {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("识别镜像缓存、卷和 WSL 虚拟磁盘")},
@@ -190,7 +190,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("发现 Windows.old、更新备份和卷影副本入口")},
         {FeatureModule::BrowserCache, QStringLiteral("浏览器缓存中心"), QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器缓存和离线数据")},
         {FeatureModule::StartupFootprint, QStringLiteral("启动项体积检查"), QStringLiteral("盘点开机启动入口及其关联程序占用")},
-        {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"), QStringLiteral("识别微信、Teams、Slack、Discord 等聊天客户端本地缓存")},
+        {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"), QStringLiteral("识别微信、企业微信、QQ、Teams 等聊天客户端的本地数据与缓存")},
         {FeatureModule::MailArchive, QStringLiteral("邮件归档库检查"), QStringLiteral("发现 PST、OST、MBOX 等邮件归档和离线邮箱文件")},
         {FeatureModule::VirtualMachineImages, QStringLiteral("虚拟机镜像管理"), QStringLiteral("发现 VHD、VMDK、VDI、QCOW2 等大型虚拟磁盘")},
     };
@@ -543,6 +543,7 @@ FindingSeverity SeverityForFinding(const FeatureFinding& finding) {
     if (finding.bytes >= 10ULL * 1024ULL * 1024ULL * 1024ULL ||
         state.contains(QStringLiteral("虚拟磁盘")) ||
         state.contains(QStringLiteral("聊天缓存")) ||
+        state.contains(QStringLiteral("聊天客户端数据")) ||
         state.contains(QStringLiteral("邮件归档")) ||
         state.contains(QStringLiteral("浏览器缓存"))) {
         return FindingSeverity::Notice;
@@ -820,7 +821,8 @@ void CollectLargeChildDirectories(QVector<FeatureFinding>& out, const QString& r
         if (summary.bytes < minBytes) {
             continue;
         }
-        const QString detail = QStringLiteral("可先复制到目标盘，再用 junction 保持原路径；当前版本生成计划，不直接执行迁移。");
+        const QString detail = QStringLiteral("可先复制到目标盘，再用 junction 保持原路径；当前版本生成计划，不直接执行迁移。"
+                                              " 注：多为已安装程序目录，与“软件体积”模块盘点的同一批程序重叠，此处仅按“可迁移大目录”筛选，并非额外占用。");
         AddFinding(out, FeatureModule::AppMover, entry.fileName(), state, detail, entry.absoluteFilePath(), summary.bytes);
     }
 }
@@ -907,11 +909,13 @@ void ScanDownloadOrganizer(QVector<FeatureFinding>& out, const QString& sourcePa
     QStringList roots;
     roots << StandardPathOrHome(QStandardPaths::DownloadLocation);
     roots << StandardPathOrHome(QStandardPaths::DesktopLocation);
-    roots << QDir::homePath() + QStringLiteral("/Documents/WeChat Files");
-    roots << QDir::homePath() + QStringLiteral("/Documents/Tencent Files");
+    // 不在此扫描 WeChat Files / Tencent Files:那是聊天客户端目录(聊天接收的文件/图片/视频等用户
+    // 数据 + 缓存),归属"聊天缓存"模块(MessengerCache)。原行为会与该模块重复计数,并把聊天接收
+    // 文件误归类为"下载整理"。用户仍可通过源路径手动追加任意目录。
     if (PathExists(sourcePath)) {
         roots << sourcePath;
     }
+    int emitted = 0;
     for (const QString& root : ExistingPaths(roots)) {
         if (IsCancelled(cancelFlag)) {
             break;
@@ -934,7 +938,12 @@ void ScanDownloadOrganizer(QVector<FeatureFinding>& out, const QString& sourcePa
                        QStringLiteral("整理计划"),
                        QStringLiteral("共 %1 个文件，可按类型移动到子目录。").arg(item.second.second),
                        root, item.second.first);
+            ++emitted;
         }
+    }
+    if (emitted == 0) {
+        AddFinding(out, FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("未发现"),
+                   QStringLiteral("下载和桌面目录未发现可整理文件；可在源路径手动追加目录。"));
     }
 }
 
@@ -1240,21 +1249,27 @@ void ScanMessengerCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomi
          * @brief 缓存候选路径。
          */
         QString path;
+
+        /**
+         * @brief 是否为"用户数据型"目录:整目录含聊天接收的文件/图片/视频等需保留内容,不可当纯缓存整目录删除。
+         */
+        bool isUserData = false;
     };
 
     const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
     const QString roamingAppData = qEnvironmentVariable("APPDATA");
     const QString documents = StandardPathOrHome(QStandardPaths::DocumentsLocation);
     QVector<CacheCandidate> candidates{
-        {QStringLiteral("微信文件"), documents + QStringLiteral("/WeChat Files")},
-        {QStringLiteral("企业微信文件"), documents + QStringLiteral("/WXWork")},
-        {QStringLiteral("微信配置缓存"), roamingAppData + QStringLiteral("/Tencent/WeChat")},
-        {QStringLiteral("QQ 缓存"), roamingAppData + QStringLiteral("/Tencent/QQ")},
-        {QStringLiteral("Microsoft Teams"), roamingAppData + QStringLiteral("/Microsoft/Teams")},
-        {QStringLiteral("新版 Teams"), localAppData + QStringLiteral("/Packages/MSTeams_8wekyb3d8bbwe")},
-        {QStringLiteral("Slack"), roamingAppData + QStringLiteral("/Slack")},
-        {QStringLiteral("Discord"), roamingAppData + QStringLiteral("/discord")},
-        {QStringLiteral("Telegram Desktop"), roamingAppData + QStringLiteral("/Telegram Desktop")},
+        {QStringLiteral("微信文件"), documents + QStringLiteral("/WeChat Files"), true},
+        {QStringLiteral("企业微信文件"), documents + QStringLiteral("/WXWork"), true},
+        {QStringLiteral("QQ 文件"), documents + QStringLiteral("/Tencent Files"), true},
+        {QStringLiteral("微信配置缓存"), roamingAppData + QStringLiteral("/Tencent/WeChat"), false},
+        {QStringLiteral("QQ 缓存"), roamingAppData + QStringLiteral("/Tencent/QQ"), false},
+        {QStringLiteral("Microsoft Teams"), roamingAppData + QStringLiteral("/Microsoft/Teams"), false},
+        {QStringLiteral("新版 Teams"), localAppData + QStringLiteral("/Packages/MSTeams_8wekyb3d8bbwe"), false},
+        {QStringLiteral("Slack"), roamingAppData + QStringLiteral("/Slack"), false},
+        {QStringLiteral("Discord"), roamingAppData + QStringLiteral("/discord"), false},
+        {QStringLiteral("Telegram Desktop"), roamingAppData + QStringLiteral("/Telegram Desktop"), false},
     };
 
     int emitted = 0;
@@ -1269,9 +1284,18 @@ void ScanMessengerCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomi
         if (summary.bytes < 150ULL * 1024ULL * 1024ULL) {
             continue;
         }
-        AddFinding(out, FeatureModule::MessengerCache, candidate.name, QStringLiteral("聊天缓存"),
-                   QStringLiteral("聊天客户端本地文件和缓存。建议优先在客户端内清理或迁移存储位置。"),
-                   candidate.path, summary.bytes);
+        // 用户数据型目录(微信/企业微信/QQ 的 Files)整目录含聊天接收的文件/图片/视频,不可当"缓存"
+        // 整目录删除——原统一标"聊天缓存"会误导用户清空致数据丢失。改标"聊天客户端数据"并明确勿整目录
+        // 删;真正的配置/缓存目录仍标"聊天缓存"。
+        if (candidate.isUserData) {
+            AddFinding(out, FeatureModule::MessengerCache, candidate.name, QStringLiteral("聊天客户端数据"),
+                       QStringLiteral("含聊天接收的文件/图片/视频等用户数据与部分缓存，请勿整目录删除；建议在客户端内迁移存储位置或仅清理缓存子目录。"),
+                       candidate.path, summary.bytes);
+        } else {
+            AddFinding(out, FeatureModule::MessengerCache, candidate.name, QStringLiteral("聊天缓存"),
+                       QStringLiteral("聊天客户端本地文件和缓存。建议优先在客户端内清理或迁移存储位置。"),
+                       candidate.path, summary.bytes);
+        }
         ++emitted;
     }
 
