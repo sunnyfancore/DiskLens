@@ -1594,6 +1594,79 @@ void ScanRestorePoint(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_
 }
 
 /**
+ * @brief 执行单个模块的体检(异常隔离层)。
+ *
+ * 本函数封装"按模块分发到对应 ScanXxx"的 switch。它在 BuildFindings 中被 per-module try/catch 包裹
+ * 调用:任一模块抛异常时,由该 catch 捕获并以一条"扫描失败"占位行替代该模块结果,不让异常冒泡到
+ * 后台工作线程(否则 std::terminate 整个进程),其余模块继续扫描。
+ */
+void ScanOneModule(QVector<FeatureFinding>& out, FeatureModule module, const QString& sourcePath, const QString& targetPath,
+                   std::shared_ptr<std::atomic_bool> cancelFlag) {
+    switch (module) {
+    case FeatureModule::GrowthTrace:
+        ScanGrowthTrace(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::SoftwareFootprint:
+        ScanSoftwareFootprint(out, cancelFlag);
+        break;
+    case FeatureModule::AppMover:
+        ScanAppMover(out, targetPath, cancelFlag);
+        break;
+    case FeatureModule::ArchiveAssistant:
+        ScanArchiveAssistant(out, sourcePath, targetPath, cancelFlag);
+        break;
+    case FeatureModule::DownloadOrganizer:
+        ScanDownloadOrganizer(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::PrivacyRadar:
+        ScanPrivacyRadar(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::DeveloperSpace:
+        ScanDeveloperSpace(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::DockerWsl:
+        ScanDockerWsl(out, cancelFlag);
+        break;
+    case FeatureModule::MediaOrganizer:
+        ScanMediaOrganizer(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::QuotaBudget:
+        ScanQuotaBudget(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::BackupGap:
+        ScanBackupGap(out, sourcePath, targetPath, cancelFlag);
+        break;
+    case FeatureModule::FileUnlocker:
+        ScanFileUnlocker(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::TransferAssistant:
+        ScanTransferAssistant(out, sourcePath, targetPath, cancelFlag);
+        break;
+    case FeatureModule::CloudSync:
+        ScanCloudSync(out, cancelFlag);
+        break;
+    case FeatureModule::RestorePoint:
+        ScanRestorePoint(out, cancelFlag);
+        break;
+    case FeatureModule::BrowserCache:
+        ScanBrowserCache(out, cancelFlag);
+        break;
+    case FeatureModule::StartupFootprint:
+        ScanStartupFootprint(out, cancelFlag);
+        break;
+    case FeatureModule::MessengerCache:
+        ScanMessengerCache(out, cancelFlag);
+        break;
+    case FeatureModule::MailArchive:
+        ScanMailArchive(out, sourcePath, cancelFlag);
+        break;
+    case FeatureModule::VirtualMachineImages:
+        ScanVirtualMachineImages(out, sourcePath, cancelFlag);
+        break;
+    }
+}
+
+/**
  * @brief 按模块执行扫描。
  * @param modules 需要执行的模块列表。
  * @param sourcePath 源路径。
@@ -1607,67 +1680,16 @@ QVector<FeatureFinding> BuildFindings(const QVector<FeatureModule>& modules, con
         if (IsCancelled(cancelFlag)) {
             break;
         }
-        switch (module) {
-        case FeatureModule::GrowthTrace:
-            ScanGrowthTrace(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::SoftwareFootprint:
-            ScanSoftwareFootprint(out, cancelFlag);
-            break;
-        case FeatureModule::AppMover:
-            ScanAppMover(out, targetPath, cancelFlag);
-            break;
-        case FeatureModule::ArchiveAssistant:
-            ScanArchiveAssistant(out, sourcePath, targetPath, cancelFlag);
-            break;
-        case FeatureModule::DownloadOrganizer:
-            ScanDownloadOrganizer(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::PrivacyRadar:
-            ScanPrivacyRadar(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::DeveloperSpace:
-            ScanDeveloperSpace(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::DockerWsl:
-            ScanDockerWsl(out, cancelFlag);
-            break;
-        case FeatureModule::MediaOrganizer:
-            ScanMediaOrganizer(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::QuotaBudget:
-            ScanQuotaBudget(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::BackupGap:
-            ScanBackupGap(out, sourcePath, targetPath, cancelFlag);
-            break;
-        case FeatureModule::FileUnlocker:
-            ScanFileUnlocker(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::TransferAssistant:
-            ScanTransferAssistant(out, sourcePath, targetPath, cancelFlag);
-            break;
-        case FeatureModule::CloudSync:
-            ScanCloudSync(out, cancelFlag);
-            break;
-        case FeatureModule::RestorePoint:
-            ScanRestorePoint(out, cancelFlag);
-            break;
-        case FeatureModule::BrowserCache:
-            ScanBrowserCache(out, cancelFlag);
-            break;
-        case FeatureModule::StartupFootprint:
-            ScanStartupFootprint(out, cancelFlag);
-            break;
-        case FeatureModule::MessengerCache:
-            ScanMessengerCache(out, cancelFlag);
-            break;
-        case FeatureModule::MailArchive:
-            ScanMailArchive(out, sourcePath, cancelFlag);
-            break;
-        case FeatureModule::VirtualMachineImages:
-            ScanVirtualMachineImages(out, sourcePath, cancelFlag);
-            break;
+        // 单模块异常隔离:任一 ScanXxx 抛异常只以"扫描失败"占位替代该模块结果,不冒泡到调用者(后台
+        // 工作线程),杜绝 std::terminate;其余模块继续扫描。
+        try {
+            ScanOneModule(out, module, sourcePath, targetPath, cancelFlag);
+        } catch (const std::exception& e) {
+            AddFinding(out, module, ModuleTitle(module), QStringLiteral("扫描失败"),
+                       QStringLiteral("模块扫描异常,已跳过该模块:") + QString::fromLocal8Bit(e.what()));
+        } catch (...) {
+            AddFinding(out, module, ModuleTitle(module), QStringLiteral("扫描失败"),
+                       QStringLiteral("模块扫描遇到未知异常,已跳过该模块"));
         }
     }
     std::sort(out.begin(), out.end(), [](const FeatureFinding& left, const FeatureFinding& right) {
@@ -2132,21 +2154,52 @@ void FeatureHubWidget::RunAllScans() {
     workerFinishedFlag_ = finished;
     // 工作线程不再 detach 也不捕获裸 this:由 scanWorker_ 成员持有,退出时 RequestShutdownForQuit/
     // 析构经 JoinWorkerBounded 回收;回投经 QPointer 守卫 + quitting_ 标志,杜绝"扫描中关窗→回投悬垂 this"的 UAF。
-    scanWorker_ = std::thread([self = QPointer<FeatureHubWidget>(this), modules, sourcePath, targetPath, requestId, cancelFlag, finished]() {
-        QVector<FeatureFinding> findings = BuildFindings(modules, sourcePath, targetPath, cancelFlag);
-        const bool cancelled = IsCancelled(cancelFlag);
-        FeatureHubWidget* const target = self.data();
-        if (target != nullptr) {
-            QMetaObject::invokeMethod(target, [self, findings = std::move(findings), requestId, cancelled]() mutable {
-                if (self.isNull() || self->quitting_.load()) {
-                    return;
+    try {
+        scanWorker_ = std::thread([self = QPointer<FeatureHubWidget>(this), modules, sourcePath, targetPath, requestId, cancelFlag, finished]() {
+            // 工作线程终极兜底:BuildFindings 内部已对每个 ScanXxx 单独 try/catch 并产出"扫描失败"行,
+            // 此处再包一层捕获 BuildFindings 其余极罕见异常(如排序比较器抛出),杜绝异常冒泡出线程函数→
+            // std::terminate 整个进程。捕获后尽力回投复位 UI(本线程执行期间 scanning_ 恒为真,无更新的
+            // 体检并发,复位安全),避免扫描卡在"进行中"。finished 置真位于内层 try/catch 之外,保证关窗
+            // join 及时返回。
+            try {
+                QVector<FeatureFinding> findings = BuildFindings(modules, sourcePath, targetPath, cancelFlag);
+                const bool cancelled = IsCancelled(cancelFlag);
+                FeatureHubWidget* const target = self.data();
+                if (target != nullptr) {
+                    QMetaObject::invokeMethod(target, [self, findings = std::move(findings), requestId, cancelled]() mutable {
+                        if (self.isNull() || self->quitting_.load()) {
+                            return;
+                        }
+                        self->ReplaceFindings(std::move(findings), requestId, cancelled);
+                    }, Qt::QueuedConnection);
                 }
-                self->ReplaceFindings(std::move(findings), requestId, cancelled);
-            }, Qt::QueuedConnection);
-        }
-        // 标记完成:写堆上 shared atomic(非 this 成员),与 widget 析构彻底解耦,杜绝悬垂访问。
-        finished->store(true);
-    });
+            } catch (...) {
+                // 仅置忙碌假 + 诚实状态文案(不伪造"完成"),self/quitting 守卫防悬垂回投。
+                // 回投 invokeMethod 本身再包一层 try/catch:即便回投构造(OOM 等)抛异常也吞掉,杜绝异常
+                // 二次逃逸出线程函数(std::terminate)。终极目标是线程函数绝不抛。
+                FeatureHubWidget* const target = self.data();
+                if (target != nullptr) {
+                    try {
+                        QMetaObject::invokeMethod(target, [self]() {
+                            if (self.isNull() || self->quitting_.load()) {
+                                return;
+                            }
+                            self->SetBusy(false, QStringLiteral("体检遇到意外错误,请重试;若持续出现请检查源路径权限。"));
+                        }, Qt::QueuedConnection);
+                    } catch (...) {
+                        // 回投失败已尽力,吞掉保线程不抛。
+                    }
+                }
+            }
+            // 标记完成:写堆上 shared atomic(非 this 成员),与 widget 析构彻底解耦,杜绝悬垂访问。
+            finished->store(true);
+        });
+    } catch (const std::exception&) {
+        // 线程创建/lambda 捕获失败(system_error 资源耗尽、bad_alloc 拷贝捕获等极罕见):复位忙碌状态,
+        // 避免异常逃逸出 Qt 槽或 UI 卡在"扫描中";下一轮体检可重试。捕 std::exception 兼顾两类。
+        workerFinishedFlag_.reset();
+        SetBusy(false, QStringLiteral("无法启动后台体检:线程创建失败,请关闭多余程序后重试。"));
+    }
 }
 
 void FeatureHubWidget::RunCurrentScan() {
@@ -2172,21 +2225,50 @@ void FeatureHubWidget::RunCurrentScan() {
     // 每轮新建堆上完成标志(shared_ptr 管理):worker 拷贝持有、退出时置真,与 widget 析构彻底解耦。
     auto finished = std::make_shared<std::atomic_bool>(false);
     workerFinishedFlag_ = finished;
-    scanWorker_ = std::thread([self = QPointer<FeatureHubWidget>(this), module, sourcePath, targetPath, requestId, cancelFlag, finished]() {
-        QVector<FeatureFinding> findings = BuildFindings(QVector<FeatureModule>{module}, sourcePath, targetPath, cancelFlag);
-        const bool cancelled = IsCancelled(cancelFlag);
-        FeatureHubWidget* const target = self.data();
-        if (target != nullptr) {
-            QMetaObject::invokeMethod(target, [self, findings = std::move(findings), requestId, cancelled]() mutable {
-                if (self.isNull() || self->quitting_.load()) {
-                    return;
+    try {
+        scanWorker_ = std::thread([self = QPointer<FeatureHubWidget>(this), module, sourcePath, targetPath, requestId, cancelFlag, finished]() {
+            // 工作线程终极兜底:BuildFindings 内部已对每个 ScanXxx 单独 try/catch 并产出"扫描失败"行,
+            // 此处再包一层捕获 BuildFindings 其余极罕见异常,杜绝异常冒泡出线程函数→std::terminate 整个
+            // 进程;捕获后尽力回投复位 UI,避免扫描卡在"进行中"。finished 置真位于内层 try/catch 之外。
+            try {
+                QVector<FeatureFinding> findings = BuildFindings(QVector<FeatureModule>{module}, sourcePath, targetPath, cancelFlag);
+                const bool cancelled = IsCancelled(cancelFlag);
+                FeatureHubWidget* const target = self.data();
+                if (target != nullptr) {
+                    QMetaObject::invokeMethod(target, [self, findings = std::move(findings), requestId, cancelled]() mutable {
+                        if (self.isNull() || self->quitting_.load()) {
+                            return;
+                        }
+                        self->ReplaceFindings(std::move(findings), requestId, cancelled);
+                    }, Qt::QueuedConnection);
                 }
-                self->ReplaceFindings(std::move(findings), requestId, cancelled);
-            }, Qt::QueuedConnection);
-        }
-        // 标记完成:写堆上 shared atomic(非 this 成员),与 widget 析构彻底解耦,杜绝悬垂访问。
-        finished->store(true);
-    });
+            } catch (...) {
+                // 仅置忙碌假 + 诚实状态文案(不伪造"完成"),self/quitting 守卫防悬垂回投。
+                // 回投 invokeMethod 本身再包一层 try/catch:即便回投构造(OOM 等)抛异常也吞掉,杜绝异常
+                // 二次逃逸出线程函数(std::terminate)。终极目标是线程函数绝不抛。
+                FeatureHubWidget* const target = self.data();
+                if (target != nullptr) {
+                    try {
+                        QMetaObject::invokeMethod(target, [self]() {
+                            if (self.isNull() || self->quitting_.load()) {
+                                return;
+                            }
+                            self->SetBusy(false, QStringLiteral("体检遇到意外错误,请重试;若持续出现请检查源路径权限。"));
+                        }, Qt::QueuedConnection);
+                    } catch (...) {
+                        // 回投失败已尽力,吞掉保线程不抛。
+                    }
+                }
+            }
+            // 标记完成:写堆上 shared atomic(非 this 成员),与 widget 析构彻底解耦,杜绝悬垂访问。
+            finished->store(true);
+        });
+    } catch (const std::exception&) {
+        // 线程创建/lambda 捕获失败(system_error 资源耗尽、bad_alloc 拷贝捕获等极罕见):复位忙碌状态,
+        // 避免异常逃逸出 Qt 槽或 UI 卡在"扫描中";下一轮体检可重试。捕 std::exception 兼顾两类。
+        workerFinishedFlag_.reset();
+        SetBusy(false, QStringLiteral("无法启动后台体检:线程创建失败,请关闭多余程序后重试。"));
+    }
 }
 
 void FeatureHubWidget::CancelScan() {
