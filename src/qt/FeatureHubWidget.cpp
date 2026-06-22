@@ -600,16 +600,69 @@ void AddFinding(QVector<FeatureFinding>& out, FeatureModule module, const QStrin
 }
 
 /**
+ * @brief 将路径归一化为稳定键的路径分量。
+ * @param path 原始路径。
+ * @return 去长路径前缀、统一反斜杠、大小写不敏感、去尾分隔符后的路径键。
+ *
+ * 使同一目录/文件在不同写法下(\\?\ 前缀、/ vs \、尾部分隔符、大小写)生成同一键,避免忽略/基线标记
+ * 因路径写法漂移而失配。
+ */
+QString NormalizeKeyPath(const QString& path) {
+    QString s = path.trimmed();
+    if (s.startsWith(QStringLiteral("\\\\?\\"))) {
+        s = s.mid(4);
+    } else if (s.startsWith(QStringLiteral("\\\\.\\"))) {
+        s = s.mid(4);
+    }
+    s = QDir::toNativeSeparators(s).toCaseFolded();
+    while (s.endsWith(QLatin1Char('\\')) || s.endsWith(QLatin1Char('/'))) {
+        s.chop(1);
+    }
+    return s;
+}
+
+/**
  * @brief 生成结果稳定键，用于忽略列表与跨会话复核。
  * @param finding 检测结果。
- * @return 稳定键文本。
+ * @return 稳定键文本(v2 格式,不含 state)。
+ *
+ * v2 键格式:v2|module|title|path(去 state 维度)。原 v1 含 state,模块一旦改 title/state 文案(名实不符
+ * 深改)就会使旧忽略/基线/已处理标记全部失配,标记反复漂移。去 state 后,只要同一目录/文件 + 同一标题
+ * 即视为同一项,标记稳定。路径经 NormalizeKeyPath 归一化,标题/路径均不含 '|'(Windows 路径非法字符),
+ * 故按 '|' 拆分迁移安全。
  */
 QString FindingStableKey(const FeatureFinding& finding) {
-    return QStringLiteral("%1|%2|%3|%4")
+    return QStringLiteral("v2|%1|%2|%3")
         .arg(ModuleToInt(finding.module))
         .arg(finding.title.trimmed().toCaseFolded())
-        .arg(finding.path.trimmed().toCaseFolded())
-        .arg(finding.state.trimmed().toCaseFolded());
+        .arg(NormalizeKeyPath(finding.path));
+}
+
+/**
+ * @brief 把旧版(v1,含 state)稳定键迁移为 v2(去 state)。
+ * @param v1Key 旧键(module|title|path|state)或已是 v2 的键。
+ * @return v2 键;非 v1/v2 格式的键返回空串(调用方应丢弃)。
+ *
+ * v1→v2:取前 3 段(module|title|path),丢弃 state,前缀 v2。模块/标题/路径均按与 FindingStableKey 完全
+ * 相同的方式规范化(模块还原为已知整数,标题 trim+casefold,路径过 NormalizeKeyPath),使迁移后的键与新生键
+ * 逐字节相同——与旧 v1 存储时是否已 casefold 无关,标记全部保留(而非"绝大多数")。
+ */
+QString MigrateV1KeyToV2(const QString& v1Key) {
+    if (v1Key.startsWith(QStringLiteral("v2|"))) {
+        return v1Key;  // 已是 v2。
+    }
+    const QStringList parts = v1Key.split(QLatin1Char('|'));
+    if (parts.size() < 4) {
+        return QString();  // 非 v1 键(段数不足),丢弃。
+    }
+    // 模块:还原为已知整数(与 FindingStableKey 的 ModuleToInt 渲染一致);解析失败或非已知值保留原 token。
+    bool moduleOk = false;
+    const int moduleInt = parts[0].toInt(&moduleOk);
+    const QString moduleComponent = (moduleOk && IsKnownModuleValue(moduleInt)) ? QString::number(moduleInt) : parts[0];
+    return QStringLiteral("v2|%1|%2|%3")
+        .arg(moduleComponent)
+        .arg(parts[1].trimmed().toCaseFolded())
+        .arg(NormalizeKeyPath(parts[2]));
 }
 
 /**
@@ -2476,6 +2529,23 @@ QVector<FeatureFinding> BuildFindings(const QVector<FeatureModule>& modules, con
         return left.title < right.title;
     });
 
+    // 稳定键去重(v2 键不含 state):同一模块+标题+路径视为同一项,保留排序最前者(体积最大/最优先),
+    // 移除其余重复(避免同一文件/目录因 state 文案不同被多次列出或重复计费)。std::unique 仅处理相邻,
+    // 故用集合判定以适应任意顺序。
+    {
+        QSet<QString> seenKeys;
+        out.erase(std::remove_if(out.begin(), out.end(),
+                      [&seenKeys](const FeatureFinding& f) {
+                          const QString key = FindingStableKey(f);
+                          if (seenKeys.contains(key)) {
+                              return true;
+                          }
+                          seenKeys.insert(key);
+                          return false;
+                      }),
+                  out.end());
+    }
+
     // 跨模块 vhdx 归属去重:`wsl --import` 导入的发行版常把 ext4.vhdx 放在 Documents 等位置,会被
     // DockerWsl(Lxss 注册表权威归属 + 实占体积)与 VirtualMachineImages(Documents 通用 *.vhdx 扫描 +
     // 逻辑体积)同时报告,造成同一文件双计、归属冲突与体积口径不一。以 DockerWsl 的归属为准,移除
@@ -2787,32 +2857,45 @@ void FeatureHubWidget::LoadWorkflowState() {
     completedFindingKeys_.clear();
     baselineFindingKeys_.clear();
     findingNotes_.clear();
-    const QStringList ignoredKeys = settings.value(QStringLiteral("featureHub/ignoredKeys")).toStringList();
-    for (const QString& key : ignoredKeys) {
-        if (!key.trimmed().isEmpty()) {
-            ignoredFindingKeys_.insert(key);
+    // 稳定键版本迁移:keyVersion<2 时,既有忽略/已处理/基线键与备注键均为含 state 的 v1 格式,需逐条
+    // 迁移为 v2(去 state)。MigrateV1KeyToV2 按 FindingStableKey 同口径规范化模块/标题/路径,迁移键与新生键
+    // 逐字节相同,既有标记全部保留(非清空);仅 state 段不同而塌缩的同键备注做合并,不丢文本。
+    const bool migrate = settings.value(QStringLiteral("featureHub/keyVersion"), 0).toInt() < 2;
+    const auto loadKeySet = [&settings, migrate](const char* settingKey) {
+        QSet<QString> result;
+        const QStringList raw = settings.value(QLatin1String(settingKey)).toStringList();
+        for (const QString& key : raw) {
+            const QString trimmed = key.trimmed();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            const QString v2 = migrate ? MigrateV1KeyToV2(trimmed) : trimmed;
+            if (!v2.isEmpty()) {
+                result.insert(v2);
+            }
         }
-    }
-    const QStringList completedKeys = settings.value(QStringLiteral("featureHub/completedKeys")).toStringList();
-    for (const QString& key : completedKeys) {
-        if (!key.trimmed().isEmpty()) {
-            completedFindingKeys_.insert(key);
-        }
-    }
-    const QStringList baselineKeys = settings.value(QStringLiteral("featureHub/baselineKeys")).toStringList();
-    for (const QString& key : baselineKeys) {
-        if (!key.trimmed().isEmpty()) {
-            baselineFindingKeys_.insert(key);
-        }
-    }
+        return result;
+    };
+    ignoredFindingKeys_ = loadKeySet("featureHub/ignoredKeys");
+    completedFindingKeys_ = loadKeySet("featureHub/completedKeys");
+    baselineFindingKeys_ = loadKeySet("featureHub/baselineKeys");
     baselineCapturedAt_ = settings.value(QStringLiteral("featureHub/baselineCapturedAt")).toString();
     const int noteCount = settings.beginReadArray(QStringLiteral("featureHub/notes"));
     for (int index = 0; index < noteCount; ++index) {
         settings.setArrayIndex(index);
-        const QString key = settings.value(QStringLiteral("key")).toString();
+        QString key = settings.value(QStringLiteral("key")).toString();
         const QString note = settings.value(QStringLiteral("note")).toString();
+        if (migrate) {
+            key = MigrateV1KeyToV2(key);
+        }
         if (!key.trimmed().isEmpty() && !note.trimmed().isEmpty()) {
-            findingNotes_.insert(key, note);
+            // 两条 v1 键仅 state 段不同会塌缩为同一 v2 键(用户先在 stateA 加备注,重扫 state 变化后再加备注):
+            // 合并而非覆盖,避免静默丢弃旧备注(QMap::insert 会替值)。
+            if (findingNotes_.contains(key)) {
+                findingNotes_[key] = findingNotes_.value(key) + QStringLiteral("\n") + note;
+            } else {
+                findingNotes_.insert(key, note);
+            }
         }
     }
     settings.endArray();
@@ -2851,6 +2934,7 @@ void FeatureHubWidget::SaveWorkflowState() const {
     settings.setValue(QStringLiteral("featureHub/showIgnored"), showIgnoredButton_ != nullptr && showIgnoredButton_->isChecked());
     settings.setValue(QStringLiteral("featureHub/workflowFilter"), CurrentWorkflowFilterCode());
     settings.setValue(QStringLiteral("featureHub/baselineKeys"), baselineKeys);
+    settings.setValue(QStringLiteral("featureHub/keyVersion"), 2);  // v2 键(去 state),持久化版本以停止重复迁移。
     settings.setValue(QStringLiteral("featureHub/baselineCapturedAt"), baselineCapturedAt_);
     settings.remove(QStringLiteral("featureHub/notes"));
     settings.beginWriteArray(QStringLiteral("featureHub/notes"), findingNotes_.size());
