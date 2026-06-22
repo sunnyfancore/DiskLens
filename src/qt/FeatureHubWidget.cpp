@@ -1044,28 +1044,167 @@ void ScanAppMover(QVector<FeatureFinding>& out, const QString& targetPath, std::
 
 /**
  * @brief 扫描归档助手模块。
+ *
+ * 为“长期未动资料”生成**目录级**迁移归档计划:按目录 rollup(归档以目录为单位迁移,而非逐文件),
+ * 仅收“整棵子树最近一次修改也早于一年前”的陈旧大目录,按体积降序排列(先处理最大块),并对超出
+ * 发射上限的候选明示。原实现扁平枚举文件、按文件系统次序取前 80、不排序、漏掉海量小文件陈旧目录、
+ * 且上限静默截断——与“生成归档计划”名实不符。另保留“孤立大陈旧文件”检测(≥100MB 且超一年未改、
+ * 且不在任何已发陈旧目录内)以补覆盖率、不回归既有文件级结果。
+ *
  * @param out 输出结果。
  * @param sourcePath 源路径。
  * @param targetPath 目标路径。
+ * @param cancelFlag 取消标志。
  */
 void ScanArchiveAssistant(QVector<FeatureFinding>& out, const QString& sourcePath, const QString& targetPath,
                           std::shared_ptr<std::atomic_bool> cancelFlag) {
     const QString root = PathExists(sourcePath) ? sourcePath : QDir::homePath();
     const qint64 cutoff = QDateTime::currentMSecsSinceEpoch() - 365LL * 86400000LL;
-    QDirIterator iterator(root, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
-    int emitted = 0;
-    while (iterator.hasNext() && emitted < 80 && !IsCancelled(cancelFlag)) {
-        iterator.next();
-        const QFileInfo info = iterator.fileInfo();
-        const std::uint64_t bytes = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
-        if (bytes < 100ULL * 1024ULL * 1024ULL || info.lastModified().toMSecsSinceEpoch() > cutoff) {
+    constexpr std::uint64_t kMinArchiveBytes = 100ULL * 1024ULL * 1024ULL;  // 100 MiB:值得单独归档的最小目录/文件
+    constexpr int kMaxDepth = 4;              // 钻取最大深度(防极深目录树耗时)
+    constexpr int kMaxDirEmitted = 40;        // 陈旧目录候选发射上限
+    constexpr int kMaxTotalEmitted = 80;      // 目录+孤立文件合计发射上限(与既有规模一致)
+    constexpr int kMaxVisitedDirs = 40000;    // 钻取访问目录数上限
+    constexpr int kMaxVisitedFiles = 200000;  // 孤立文件扫描访问数上限
+    const QLatin1Char sep('\\');
+
+    const QString moveNote = targetPath.isEmpty()
+        ? QStringLiteral("建议将整个目录移动到归档盘或离线介质。")
+        : QStringLiteral("可整体归档到：%1。").arg(QDir::toNativeSeparators(targetPath));
+
+    struct DirCandidate { QString path; std::uint64_t bytes; qint64 latestMtimeMsec; bool truncated; };
+    QVector<DirCandidate> dirCandidates;
+
+    // 整个源目录完全陈旧(用户选了某个陈旧文件夹)→ 单一候选,无需钻取,其内文件也全陈旧故无需再扫孤立文件。
+    const PathSizeSummary rootSummary = ComputePathSizeLimited(root, 12000, cancelFlag);
+    const bool rootFullyStale = rootSummary.bytes >= kMinArchiveBytes
+        && rootSummary.latestMtimeMsec > 0 && rootSummary.latestMtimeMsec < cutoff;
+    if (rootFullyStale) {
+        dirCandidates.append({root, rootSummary.bytes, rootSummary.latestMtimeMsec, rootSummary.truncated});
+    } else if (!IsCancelled(cancelFlag)) {
+        // 限定深度钻取:<100MB 剪枝不下钻(子目录只会更小);“大且陈旧”收为候选且不再下钻(子树已由本目录
+        // 代表,候选天然互斥);仅“大且活跃”才下钻,在其内部找陈旧子部分。每目录仅量一次。
+        QStringList currentLevel;
+        currentLevel.append(root);
+        int visitedDirs = 0;
+        for (int depth = 0; depth < kMaxDepth && !currentLevel.isEmpty() && !IsCancelled(cancelFlag); ++depth) {
+            QStringList nextLevel;
+            for (const QString& dir : currentLevel) {
+                if (IsCancelled(cancelFlag) || visitedDirs >= kMaxVisitedDirs) {
+                    break;
+                }
+                ++visitedDirs;
+                const QFileInfoList entries = QDir(dir).entryInfoList(
+                    QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
+                for (const QFileInfo& entry : entries) {
+                    if (IsCancelled(cancelFlag)) {
+                        break;
+                    }
+                    const QString childPath = entry.absoluteFilePath();
+                    const PathSizeSummary summary = ComputePathSizeLimited(childPath, 12000, cancelFlag);
+                    if (summary.bytes < kMinArchiveBytes) {
+                        continue;  // 小目录剪枝。
+                    }
+                    if (summary.latestMtimeMsec > 0 && summary.latestMtimeMsec < cutoff) {
+                        dirCandidates.append({childPath, summary.bytes, summary.latestMtimeMsec, summary.truncated});
+                    } else {
+                        nextLevel.append(childPath);  // 大且活跃 → 下钻找陈旧子部分。
+                    }
+                }
+            }
+            currentLevel = nextLevel;
+        }
+    }
+
+    // 按体积降序发射。钻取已不向陈旧目录下钻故候选本就互斥;此处贪心按包含关系再跳过(保险)防双计进全局
+    // totalBytes(系统导出/治理假设各 finding 互斥,见 D1/D2/D3 不变式)。父目录 ≥ 子目录故父先入列。
+    std::sort(dirCandidates.begin(), dirCandidates.end(),
+              [](const DirCandidate& a, const DirCandidate& b) { return a.bytes > b.bytes; });
+    QSet<QString> emittedRoots;
+    int emittedDirs = 0;
+    int droppedDirCandidates = 0;
+    for (const DirCandidate& c : dirCandidates) {
+        const QString key = NormalizeKeyPath(c.path);
+        bool nested = false;
+        for (const QString& seen : emittedRoots) {
+            if (seen == key || key.startsWith(seen + sep) || seen.startsWith(key + sep)) {
+                nested = true;
+                break;
+            }
+        }
+        if (nested) {
+            continue;  // 已被更大/更外层候选包含,跳过(不计入 dropped,本就不会发)。
+        }
+        if (emittedDirs >= kMaxDirEmitted) {
+            ++droppedDirCandidates;
             continue;
         }
-        const QString detail = targetPath.isEmpty()
-            ? QStringLiteral("超过一年未修改的大文件，建议移动到归档盘或离线介质。")
-            : QStringLiteral("超过一年未修改的大文件，可归档到：%1。").arg(QDir::toNativeSeparators(targetPath));
-        AddFinding(out, FeatureModule::ArchiveAssistant, info.fileName(), QStringLiteral("归档候选"), detail, info.absoluteFilePath(), bytes);
-        ++emitted;
+        emittedRoots.insert(key);
+        QString detail;
+        if (c.truncated) {
+            detail += QStringLiteral("目录较大，体积为下限估算（实际可能更高）。");
+        }
+        detail += QStringLiteral("整目录最近一次修改距今已超过一年，适合整体归档。") + moveNote;
+        AddFinding(out, FeatureModule::ArchiveAssistant, QFileInfo(c.path).fileName(),
+                   QStringLiteral("归档候选"), detail, c.path, c.bytes);
+        ++emittedDirs;
+    }
+
+    // 孤立大陈旧文件(补覆盖率、不回归既有文件级结果):不在任何已发陈旧目录内、≥100MB 且超一年未改。
+    // 文件标题(info.fileName())/状态("归档候选")/路径与旧实现一致 → v2 稳定键不漂移,既有标记保留。
+    // 文件预算随已发目录数自适应(合计不超 80):已发目录越少文件预算越大,纯文件扫描可发满 80(恢复旧上限),
+    // 避免在“无陈旧大目录、全是孤立大陈旧文件”的常见场景下把可操作候选砍半(覆盖率回归)。
+    const int fileBudget = std::max(0, kMaxTotalEmitted - emittedDirs);
+    int emittedFiles = 0;
+    int droppedFileCandidates = 0;
+    if (!IsCancelled(cancelFlag)) {
+        QDirIterator iterator(root, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+        int visitedFiles = 0;
+        while (iterator.hasNext() && visitedFiles < kMaxVisitedFiles && !IsCancelled(cancelFlag)) {
+            iterator.next();
+            ++visitedFiles;
+            const QFileInfo info = iterator.fileInfo();
+            const std::uint64_t bytes = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
+            if (bytes < kMinArchiveBytes || info.lastModified().toMSecsSinceEpoch() > cutoff) {
+                continue;
+            }
+            const QString filePath = info.absoluteFilePath();
+            const QString normFile = NormalizeKeyPath(filePath);
+            bool insideEmittedDir = false;
+            for (const QString& seen : emittedRoots) {
+                if (normFile.startsWith(seen + sep)) {
+                    insideEmittedDir = true;
+                    break;
+                }
+            }
+            if (insideEmittedDir) {
+                continue;  // 已含于某陈旧目录(体积已计入该目录),免双计。
+            }
+            if (emittedFiles >= fileBudget) {
+                ++droppedFileCandidates;
+                continue;
+            }
+            const QString detail = (targetPath.isEmpty()
+                ? QStringLiteral("超过一年未修改的大文件，建议移动到归档盘或离线介质。")
+                : QStringLiteral("超过一年未修改的大文件，可归档到：%1。").arg(QDir::toNativeSeparators(targetPath)));
+            AddFinding(out, FeatureModule::ArchiveAssistant, info.fileName(), QStringLiteral("归档候选"),
+                       detail, filePath, bytes);
+            ++emittedFiles;
+        }
+    }
+
+    if (emittedDirs == 0 && emittedFiles == 0) {
+        AddFinding(out, FeatureModule::ArchiveAssistant, QStringLiteral("归档助手"),
+                   QStringLiteral("未发现归档候选"),
+                   QStringLiteral("所选目录下未发现超过 100 MB 且超过一年未修改的内容。"),
+                   root, 0);
+    } else if (droppedDirCandidates > 0 || droppedFileCandidates > 0) {
+        // 超出发射上限的候选明示(不静默截断,免误以为“只有这些”)。
+        AddFinding(out, FeatureModule::ArchiveAssistant, QStringLiteral("更多归档候选"),
+                   QStringLiteral("归档候选"),
+                   QStringLiteral("另有 %1 个陈旧大目录、%2 个大陈旧文件因较多未逐一列出，可缩小扫描范围或提高阈值后再查。")
+                       .arg(droppedDirCandidates).arg(droppedFileCandidates),
+                   root, 0);
     }
 }
 
