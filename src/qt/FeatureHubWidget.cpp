@@ -50,6 +50,8 @@
 
 #include <Windows.h>
 #include <RestartManager.h>
+#include <objbase.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <array>
@@ -333,6 +335,58 @@ QString ExecutablePathFromCommand(const QString& command) {
     if (text.isEmpty()) {
         return {};
     }
+    // 识别 rundll32 / regsvr32 启动器(支持全路径调用:Run 键常以 %SystemRoot%\system32\rundll32.exe 形式
+    // 调用,故按"首 token 的文件名"判定而非裸名前缀)。真正的程序是其首个参数(DLL/控件),而非启动器本身。
+    auto launcherFileName = [&text]() -> QString {
+        if (text.startsWith(QLatin1Char('"'))) {
+            const int closeQuote = text.indexOf(QLatin1Char('"'), 1);
+            if (closeQuote > 1) {
+                return QFileInfo(text.mid(1, closeQuote - 1)).fileName().toCaseFolded();
+            }
+        }
+        const int firstSpace = text.indexOf(QLatin1Char(' '));
+        const QString head = firstSpace > 0 ? text.left(firstSpace) : text;
+        return QFileInfo(head).fileName().toCaseFolded();
+    };
+    const QString launcherName = launcherFileName();
+    const bool isLauncher = launcherName == QStringLiteral("rundll32.exe") ||
+                            launcherName == QStringLiteral("regsvr32.exe") ||
+                            launcherName == QStringLiteral("rundll32") ||
+                            launcherName == QStringLiteral("regsvr32");
+    if (isLauncher) {
+        // 剥离启动器 token(含其全路径),取剩余首个参数(DLL/控件)。
+        QString rest;
+        if (text.startsWith(QLatin1Char('"'))) {
+            const int closeQuote = text.indexOf(QLatin1Char('"'), 1);
+            rest = closeQuote > 1 ? text.mid(closeQuote + 1) : text.mid(1);
+        } else {
+            const int firstSpace = text.indexOf(QLatin1Char(' '));
+            rest = firstSpace > 0 ? text.mid(firstSpace) : QString();
+        }
+        rest = rest.trimmed();
+        if (rest.isEmpty()) {
+            return {};  // 启动器无参数→无法确定目标。
+        }
+        if (rest.startsWith(QLatin1Char('"'))) {
+            const int closeQuote = rest.indexOf(QLatin1Char('"'), 1);
+            if (closeQuote > 1) {
+                return QDir::toNativeSeparators(rest.mid(1, closeQuote - 1));
+            }
+        }
+        // 未加引号时取到逗号或空格前(DLL 路径后常跟 ",入口函数")。
+        int stop = rest.size();
+        const int comma = rest.indexOf(QLatin1Char(','));
+        const int space = rest.indexOf(QLatin1Char(' '));
+        if (comma > 0) {
+            stop = std::min(stop, comma);
+        }
+        if (space > 0) {
+            stop = std::min(stop, space);
+        }
+        const QString firstArg = rest.left(stop).trimmed();
+        return firstArg.isEmpty() ? QString() : QDir::toNativeSeparators(firstArg);
+    }
+
     if (text.startsWith(QLatin1Char('"'))) {
         const int closeQuote = text.indexOf(QLatin1Char('"'), 1);
         if (closeQuote > 1) {
@@ -562,7 +616,8 @@ FindingSeverity SeverityForFinding(const FeatureFinding& finding) {
         state.contains(QStringLiteral("聊天缓存")) ||
         state.contains(QStringLiteral("聊天客户端数据")) ||
         state.contains(QStringLiteral("邮件归档")) ||
-        state.contains(QStringLiteral("浏览器缓存"))) {
+        state.contains(QStringLiteral("浏览器缓存")) ||
+        state.contains(QStringLiteral("重型启动项"))) {
         return FindingSeverity::Notice;
     }
     return FindingSeverity::Normal;
@@ -1172,12 +1227,147 @@ void ScanBrowserCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_
 }
 
 /**
+ * @brief 解析 Windows 快捷方式(.lnk)的目标路径(只读,不弹 UI、不联网)。
+ * @param lnkPath 快捷方式文件路径。
+ * @return 目标可执行文件路径;解析失败或入参为空返回空串。
+ */
+QString ResolveLnkTarget(const QString& lnkPath) {
+    if (lnkPath.isEmpty()) {
+        return {};
+    }
+    const QString native = QDir::toNativeSeparators(lnkPath);
+    // 扫描跑在后台 std::thread 上,Qt 未为其初始化 COM 套间,这里按需初始化(线程内 ref-counted)。
+    const HRESULT hrInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const bool weInitialized = (hrInit == S_OK);  // S_FALSE=本线程已初始化,不重复 Uninitialize。
+    QString target;
+    IShellLinkW* shellLink = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&shellLink));
+    if (SUCCEEDED(hr) && shellLink != nullptr) {
+        IPersistFile* persistFile = nullptr;
+        hr = shellLink->QueryInterface(IID_PPV_ARGS(&persistFile));
+        if (SUCCEEDED(hr) && persistFile != nullptr) {
+            hr = persistFile->Load(reinterpret_cast<LPCOLESTR>(native.utf16()), STGM_READ);
+            if (SUCCEEDED(hr)) {
+                WCHAR path[MAX_PATH] = {};
+                WIN32_FIND_DATAW findData{};
+                // SLGP_RAWPATH 取原始存储路径;不调用 Resolve(避免可能的弹窗/网络/慢解析),快速只读。
+                hr = shellLink->GetPath(path, MAX_PATH, &findData, SLGP_RAWPATH);
+                if (SUCCEEDED(hr) && path[0] != L'\0') {
+                    target = QString::fromWCharArray(path);
+                }
+            }
+            persistFile->Release();
+        }
+        shellLink->Release();
+    }
+    if (weInitialized) {
+        CoUninitialize();
+    }
+    return target;
+}
+
+/**
+ * @brief 启动项"关联程序占用"计算结果。
+ */
+struct StartupProgramFootprint {
+    /** 程序所在目录的占用字节数(excluded/duplicate 时为 0)。 */
+    std::uint64_t bytes = 0;
+    /** 程序所在目录(程序本体目录,exe 的直属父目录)。 */
+    QString installDir;
+    /** 目录是否因条目上限被截断(bytes 为估算下限)。 */
+    bool truncated = false;
+    /** 是否系统组件(System32/SysWOW64/Windows 根),不计入用户程序占用。 */
+    bool excluded = false;
+    /** 是否与既有启动入口同属一个程序目录(体积已计入该项,不重复统计)。 */
+    bool duplicate = false;
+};
+
+/**
+ * @brief 对解析出的可执行文件,统计其安装目录(程序本体目录)体积作为"关联程序占用"。
+ *
+ * 原 StartupFootprint 只量 .lnk(~1KB)或裸 exe 单文件,数百 MB 的自更新器/同步客户端启动项会被报成 1KB。
+ * 本函数改为统计 exe 所在安装目录,更贴近"开机自启程序占用多少盘空间"。系统目录(System32/SysWOW64/
+ * Windows 根)予以排除(统计它们会得到荒谬体积且与用户程序占用无关);同一程序目录只在首个入口计入体积。
+ * @param exePath 可执行文件路径。
+ * @param cancelFlag 取消标志。
+ * @param seenDirs 已统计过的安装目录(跨文件夹+注册表共享去重);命中则 duplicate=true。
+ * @return 体积结果。
+ */
+StartupProgramFootprint ComputeStartupProgramFootprint(const QString& exePath,
+                                                       std::shared_ptr<std::atomic_bool> cancelFlag,
+                                                       QSet<QString>& seenDirs) {
+    StartupProgramFootprint fp;
+    const QFileInfo info(exePath);
+    if (exePath.isEmpty() || !info.exists() || !info.isFile()) {
+        return fp;
+    }
+    const QString installDir = QDir::toNativeSeparators(info.absolutePath());
+    const QString key = installDir.toCaseFolded();
+    const QString systemRoot = qEnvironmentVariable("SystemRoot");
+    const QString winDir = QDir::toNativeSeparators(
+        systemRoot.isEmpty() ? QStringLiteral("C:\\Windows") : systemRoot).toCaseFolded();
+    // 系统目录:凡位于 Windows 根或其任意子目录(system32/syswow64/Installer/assembly/Temp/OEM 等)的启动器
+    // 均视为系统组件——统计这些目录(尤其 Installer)既慢又会得到与"用户程序占用"无关的庞大体积。
+    const bool isSystem = (key == winDir || key.startsWith(winDir + QStringLiteral("\\")));
+    if (isSystem) {
+        fp.excluded = true;
+        fp.installDir = installDir;
+        return fp;  // 系统组件不计体积,也不进 seenDirs。
+    }
+    // 去重:不仅精确同目录,还按"目录包含关系"判定——若本目录与某已统计目录互为父子(如 App\ 与
+    // App\updater\,父目录递归统计已含子目录),则视为同一程序,体积只在先计入的入口统计,避免子树被重复累加。
+    const QLatin1Char sep('\\');
+    for (const QString& seen : seenDirs) {
+        if (seen == key || key.startsWith(seen + sep) || seen.startsWith(key + sep)) {
+            fp.duplicate = true;
+            fp.installDir = installDir;
+            return fp;  // 与既有启动入口的安装目录相同或存在包含关系,不重复统计。
+        }
+    }
+    seenDirs.insert(key);
+    fp.installDir = installDir;
+    const PathSizeSummary summary = ComputePathSizeLimited(installDir, 8000, cancelFlag);
+    fp.bytes = summary.bytes;
+    fp.truncated = summary.truncated;
+    return fp;
+}
+
+/**
+ * @brief 按"关联程序占用"体积给出启动项分级状态标签。
+ * @param programBytes 程序目录占用字节。
+ * @param excluded 系统组件。
+ * @param duplicate 与既有项同目录。
+ * @param unresolved 无法解析目标程序。
+ * @return 状态文案。
+ */
+QString StartupFootprintState(std::uint64_t programBytes, bool excluded, bool duplicate, bool unresolved) {
+    if (unresolved) {
+        return QStringLiteral("启动项（无法解析）");
+    }
+    if (excluded) {
+        return QStringLiteral("启动项（系统组件）");
+    }
+    if (duplicate) {
+        return QStringLiteral("启动项（同程序）");
+    }
+    if (programBytes >= 100ULL * 1024ULL * 1024ULL) {
+        return QStringLiteral("重型启动项");
+    }
+    if (programBytes >= 10ULL * 1024ULL * 1024ULL) {
+        return QStringLiteral("中等启动项");
+    }
+    return QStringLiteral("轻量启动项");
+}
+
+/**
  * @brief 扫描启动文件夹中的启动入口。
  * @param out 输出结果。
  * @param folder 启动文件夹路径。
  * @param cancelFlag 取消标志。
+ * @param seenDirs 跨入口共享的已统计程序目录集合(去重)。
  */
-void ScanStartupFolder(QVector<FeatureFinding>& out, const QString& folder, std::shared_ptr<std::atomic_bool> cancelFlag) {
+void ScanStartupFolder(QVector<FeatureFinding>& out, const QString& folder, std::shared_ptr<std::atomic_bool> cancelFlag,
+                       QSet<QString>& seenDirs) {
     if (!PathExists(folder)) {
         return;
     }
@@ -1185,9 +1375,40 @@ void ScanStartupFolder(QVector<FeatureFinding>& out, const QString& folder, std:
     while (iterator.hasNext() && !IsCancelled(cancelFlag)) {
         iterator.next();
         const QFileInfo info = iterator.fileInfo();
-        AddFinding(out, FeatureModule::StartupFootprint, info.fileName(), QStringLiteral("启动文件夹"),
-                   QStringLiteral("开机启动文件夹入口。可在确认不需要后从系统启动管理中禁用。"),
-                   info.absoluteFilePath(), static_cast<std::uint64_t>(std::max<qint64>(0, info.size())));
+        QString executable;
+        bool unresolved = false;
+        if (info.suffix().toCaseFolded() == QLatin1String("lnk")) {
+            executable = ResolveLnkTarget(info.absoluteFilePath());
+            if (executable.isEmpty()) {
+                unresolved = true;  // 快捷方式无法解析目标。
+            }
+        } else {
+            executable = info.absoluteFilePath();  // 非 lnk:直接作为程序文件处理。
+        }
+        // 解析到目录(如快捷方式指向文件夹)或路径不存在,同样视为无法解析。
+        if (!unresolved && !executable.isEmpty()) {
+            const QFileInfo targetInfo(executable);
+            if (!targetInfo.exists() || !targetInfo.isFile()) {
+                unresolved = true;
+            }
+        }
+        const StartupProgramFootprint fp = ComputeStartupProgramFootprint(executable, cancelFlag, seenDirs);
+        const QString state = StartupFootprintState(fp.bytes, fp.excluded, fp.duplicate, unresolved);
+        QString detail;
+        std::uint64_t bytes = 0;
+        if (unresolved) {
+            detail = QStringLiteral("开机启动文件夹入口，无法解析出可执行的目标程序，不计体积。可在系统启动管理中禁用。");
+        } else if (fp.excluded) {
+            detail = QStringLiteral("开机启动文件夹入口，程序位于系统目录（%1），不计入用户程序占用。").arg(fp.installDir);
+        } else if (fp.duplicate) {
+            detail = QStringLiteral("开机启动文件夹入口，与上方某启动项同属程序目录（%1），体积已计入该项，不重复统计。").arg(fp.installDir);
+        } else {
+            detail = QStringLiteral("开机启动文件夹入口，关联程序目录：%1，约 %2%3；注：该目录与“软件体积管理器”盘点的同一批已安装程序重叠，此处仅反映该程序是否随开机自启，并非额外占用。")
+                         .arg(fp.installDir, FormatBytesText(fp.bytes),
+                              fp.truncated ? QStringLiteral("（条目较多，为估算下限）") : QString());
+            bytes = fp.bytes;
+        }
+        AddFinding(out, FeatureModule::StartupFootprint, info.fileName(), state, detail, info.absoluteFilePath(), bytes);
     }
 }
 
@@ -1197,9 +1418,10 @@ void ScanStartupFolder(QVector<FeatureFinding>& out, const QString& folder, std:
  * @param registryRoot 注册表 Run 项路径。
  * @param label 结果来源标签。
  * @param cancelFlag 取消标志。
+ * @param seenDirs 跨入口共享的已统计程序目录集合(去重)。
  */
 void ScanStartupRegistry(QVector<FeatureFinding>& out, const QString& registryRoot, const QString& label,
-                         std::shared_ptr<std::atomic_bool> cancelFlag) {
+                         std::shared_ptr<std::atomic_bool> cancelFlag, QSet<QString>& seenDirs) {
     QSettings registry(registryRoot, QSettings::NativeFormat);
     const QStringList keys = registry.allKeys();
     for (const QString& key : keys) {
@@ -1207,15 +1429,29 @@ void ScanStartupRegistry(QVector<FeatureFinding>& out, const QString& registryRo
             break;
         }
         const QString command = registry.value(key).toString();
+        if (key == QLatin1String(".") || command.trimmed().isEmpty()) {
+            continue;  // 跳过默认值与空命令,避免误报"无法解析"。
+        }
         const QString executable = ExecutablePathFromCommand(command);
-        const QFileInfo info(executable);
-        const std::uint64_t bytes = info.exists() && info.isFile()
-            ? static_cast<std::uint64_t>(std::max<qint64>(0, info.size()))
-            : 0;
+        const StartupProgramFootprint fp = ComputeStartupProgramFootprint(executable, cancelFlag, seenDirs);
+        const QFileInfo exeInfo(executable);
+        const bool unresolved = executable.isEmpty() || !exeInfo.exists() || !exeInfo.isFile();
+        const QString state = StartupFootprintState(fp.bytes, fp.excluded, fp.duplicate, unresolved);
+        QString detail = QStringLiteral("启动命令：%1").arg(command);
+        if (unresolved) {
+            detail += QStringLiteral("；未能解析出有效的可执行文件路径，不计体积。");
+        } else if (fp.excluded) {
+            detail += QStringLiteral("；程序位于系统目录（%1），不计入用户程序占用。").arg(fp.installDir);
+        } else if (fp.duplicate) {
+            detail += QStringLiteral("；与上方某启动项同属程序目录（%1），体积已计入该项，不重复统计。").arg(fp.installDir);
+        } else {
+            detail += QStringLiteral("；关联程序目录：%1，约 %2%3；注：该目录与“软件体积管理器”盘点的同一批已安装程序重叠，此处仅反映该程序是否随开机自启，并非额外占用。")
+                          .arg(fp.installDir, FormatBytesText(fp.bytes),
+                               fp.truncated ? QStringLiteral("（条目较多，为估算下限）") : QString());
+        }
+        const QString entryPath = unresolved ? executable : exeInfo.absoluteFilePath();
         AddFinding(out, FeatureModule::StartupFootprint, QStringLiteral("%1 · %2").arg(label, key),
-                   bytes > 0 ? QStringLiteral("启动项") : QStringLiteral("路径待确认"),
-                   QStringLiteral("启动命令：%1").arg(command),
-                   info.exists() ? info.absoluteFilePath() : executable, bytes);
+                   state, detail, entryPath, fp.bytes);
     }
 }
 
@@ -1225,17 +1461,26 @@ void ScanStartupRegistry(QVector<FeatureFinding>& out, const QString& registryRo
  * @param cancelFlag 取消标志。
  */
 void ScanStartupFootprint(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_bool> cancelFlag) {
+    // 跨文件夹+注册表共享:同一程序目录只在首个入口计入体积,避免重复计费。
+    QSet<QString> seenDirs;
     const QString appData = qEnvironmentVariable("APPDATA");
     const QString programData = qEnvironmentVariable("ProgramData");
-    ScanStartupFolder(out, appData + QStringLiteral("/Microsoft/Windows/Start Menu/Programs/Startup"), cancelFlag);
-    ScanStartupFolder(out, programData + QStringLiteral("/Microsoft/Windows/Start Menu/Programs/Startup"), cancelFlag);
+    ScanStartupFolder(out, appData + QStringLiteral("/Microsoft/Windows/Start Menu/Programs/Startup"), cancelFlag, seenDirs);
+    ScanStartupFolder(out, programData + QStringLiteral("/Microsoft/Windows/Start Menu/Programs/Startup"), cancelFlag, seenDirs);
 
     ScanStartupRegistry(out, QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                        QStringLiteral("当前用户"), cancelFlag);
+                        QStringLiteral("当前用户"), cancelFlag, seenDirs);
     ScanStartupRegistry(out, QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                        QStringLiteral("全局"), cancelFlag);
+                        QStringLiteral("全局"), cancelFlag, seenDirs);
     ScanStartupRegistry(out, QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                        QStringLiteral("全局 32 位"), cancelFlag);
+                        QStringLiteral("全局 32 位"), cancelFlag, seenDirs);
+    // 补 RunOnce(一次性自启,执行后自删)与 Explorer\Run(资源管理器启动后自启)两类常见自启向量。
+    ScanStartupRegistry(out, QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"),
+                        QStringLiteral("当前用户一次性"), cancelFlag, seenDirs);
+    ScanStartupRegistry(out, QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce"),
+                        QStringLiteral("全局一次性"), cancelFlag, seenDirs);
+    ScanStartupRegistry(out, QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Run"),
+                        QStringLiteral("当前用户资源管理器"), cancelFlag, seenDirs);
 
     bool hasStartupFinding = false;
     for (const FeatureFinding& finding : out) {
