@@ -188,11 +188,11 @@ bool IsCancelled(const std::shared_ptr<std::atomic_bool>& cancelFlag) {
  */
 QVector<ModuleInfo> AllModules() {
     return {
-        {FeatureModule::GrowthTrace, QStringLiteral("空间增长溯源"), QStringLiteral("定位近期持续增长的目录和大文件")},
+        {FeatureModule::GrowthTrace, QStringLiteral("空间增长溯源"), QStringLiteral("列出近 7 天新写入或修改的大文件，及累计偏大的目录（按修改时间，非增量测量）")},
         {FeatureModule::SoftwareFootprint, QStringLiteral("软件体积管理器"), QStringLiteral("估算已安装软件及安装目录真实占用")},
-        {FeatureModule::AppMover, QStringLiteral("应用 / 游戏搬家"), QStringLiteral("识别适合迁移到目标盘的大型应用和游戏")},
+        {FeatureModule::AppMover, QStringLiteral("应用 / 游戏搬家"), QStringLiteral("识别适合迁移的大型应用和游戏目录并生成迁移计划（不校验目标盘空间、不执行迁移）")},
         {FeatureModule::ArchiveAssistant, QStringLiteral("归档助手"), QStringLiteral("为长期未动资料生成迁移归档计划")},
-        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型整理下载和桌面文件（可在源路径追加目录）")},
+        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型统计下载和桌面文件的体积与数量并给出整理建议（只报告不移动；可在源路径追加目录）")},
         {FeatureModule::PrivacyRadar, QStringLiteral("隐私文件雷达"), QStringLiteral("发现密钥、证书、合同和身份信息等敏感文件")},
         {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"), QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境")},
         {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘并核算真实占用,提示压缩 / prune 途径")},
@@ -202,7 +202,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::FileUnlocker, QStringLiteral("文件占用识别器"), QStringLiteral("用 Windows Restart Manager 识别占用进程（仅识别不自动解锁）")},
         {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
         {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"), QStringLiteral("识别同步盘本地占用、冲突文件和大缓存")},
-        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("发现 Windows.old、更新备份和卷影副本入口")},
+        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("核算 Windows.old、更新备份与恢复目录占用；卷影副本与还原点仅给出系统保护查看入口（不枚举）")},
         {FeatureModule::BrowserCache, QStringLiteral("浏览器缓存中心"), QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器缓存和离线数据")},
         {FeatureModule::StartupFootprint, QStringLiteral("启动项体积检查"), QStringLiteral("盘点开机启动入口及其关联程序占用")},
         {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"), QStringLiteral("识别微信、企业微信、QQ、Teams 等聊天客户端的本地数据与缓存")},
