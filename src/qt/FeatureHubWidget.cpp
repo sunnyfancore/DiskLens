@@ -1166,10 +1166,16 @@ void ScanPrivacyRadar(QVector<FeatureFinding>& out, const QString& sourcePath, s
  * @return 命中开发热点时返回 true。
  */
 bool IsDeveloperHotDirectory(const QString& name) {
+    // 原集合只覆盖 node_modules/venv/构建产物 + .m2/.cargo/.gradle/.pnpm-store,遗漏多数最占空间的 Windows
+    // 开发包缓存。补充:.nuget(NuGet 全局包)、.npm(npm 缓存)、.cache(pip/go-build 等通用缓存)、.yarn、
+    // go-build、vendor(Go/PHP 依赖)、.sbt/.ivy2(Scala),兑现描述"包缓存"承诺。__pycache__ 等恒小目录不计入
+    // (永远到不了 100 MiB 阈值,只会徒增无效 size 遍历)。
     static const QSet<QString> names{
         QStringLiteral("node_modules"), QStringLiteral(".venv"), QStringLiteral("venv"), QStringLiteral("target"),
         QStringLiteral("build"), QStringLiteral("dist"), QStringLiteral(".next"), QStringLiteral(".gradle"),
-        QStringLiteral(".m2"), QStringLiteral(".cargo"), QStringLiteral(".pnpm-store"), QStringLiteral("packages")
+        QStringLiteral(".m2"), QStringLiteral(".cargo"), QStringLiteral(".pnpm-store"), QStringLiteral("packages"),
+        QStringLiteral(".nuget"), QStringLiteral(".npm"), QStringLiteral(".cache"), QStringLiteral(".yarn"),
+        QStringLiteral("go-build"), QStringLiteral("vendor"), QStringLiteral(".sbt"), QStringLiteral(".ivy2")
     };
     return names.contains(name.toCaseFolded());
 }
@@ -1404,12 +1410,40 @@ void ScanDockerWsl(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_boo
 bool IsBrowserCacheDirectory(const QString& name, const QString& absolutePath) {
     const QString foldedName = name.toCaseFolded();
     const QString foldedPath = QDir::fromNativeSeparators(absolutePath).toCaseFolded();
+    // cache2/startupcache 是 Firefox 的实际磁盘缓存目录名(原 name 集只有 "cache",Firefox cache2 被静默漏掉,
+    // 与"识别 Firefox"承诺不符)。cache2 为 Firefox 主磁盘缓存,startupcache 为启动缓存。
     static const QSet<QString> names{
-        QStringLiteral("cache"), QStringLiteral("code cache"), QStringLiteral("gpucache"),
+        QStringLiteral("cache"), QStringLiteral("cache2"), QStringLiteral("startupcache"),
+        QStringLiteral("code cache"), QStringLiteral("gpucache"),
         QStringLiteral("cachestorage"), QStringLiteral("shadercache"), QStringLiteral("blob_storage"),
         QStringLiteral("indexeddb")
     };
     return names.contains(foldedName) || foldedPath.contains(QStringLiteral("/service worker/cachestorage"));
+}
+
+/**
+ * @brief 由缓存目录路径推断所属浏览器名称(供标题区分,兑现"识别 Chrome、Edge、Firefox")。
+ * @param absolutePath 缓存目录绝对路径。
+ * @return 浏览器短名;无法判定返回"浏览器"。
+ *
+ * Chromium 系(Chrome/Edge/Brave)共用 "User Data/Default/..." 布局,逐项标题原本只有目录名(Cache/GPUCache)
+ * 无法区分浏览器;Firefox 在 Mozilla/Firefox/Profiles 下。按路径特征给出浏览器名,标题改为"目录名（浏览器）"。
+ */
+QString BrowserLabelFromPath(const QString& absolutePath) {
+    const QString folded = QDir::fromNativeSeparators(absolutePath).toCaseFolded();
+    if (folded.contains(QStringLiteral("/google/chrome/"))) {
+        return QStringLiteral("Chrome");
+    }
+    if (folded.contains(QStringLiteral("/microsoft/edge/"))) {
+        return QStringLiteral("Edge");
+    }
+    if (folded.contains(QStringLiteral("/bravesoftware/"))) {
+        return QStringLiteral("Brave");
+    }
+    if (folded.contains(QStringLiteral("/mozilla/firefox/"))) {
+        return QStringLiteral("Firefox");
+    }
+    return QStringLiteral("浏览器");
 }
 
 /**
@@ -1446,8 +1480,11 @@ void ScanBrowserCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_
             if (summary.bytes < 80ULL * 1024ULL * 1024ULL) {
                 continue;
             }
+            // 标题保持 fileName() 不变(稳定键 v2|module|title|path 含 title,改标题会使既有忽略/已处理/基线/备注
+            // 标记失配漂移)。浏览器归属放明细前缀,既区分 Chrome/Edge/Brave/Firefox 又不破坏标记稳定性。
             AddFinding(out, FeatureModule::BrowserCache, info.fileName(), QStringLiteral("浏览器缓存"),
-                       QStringLiteral("建议在浏览器设置中清理缓存或站点离线数据，避免直接删除整个用户配置。"),
+                       QStringLiteral("（%1）建议在浏览器设置中清理缓存或站点离线数据，避免直接删除整个用户配置。")
+                           .arg(BrowserLabelFromPath(info.absoluteFilePath())),
                        info.absoluteFilePath(), summary.bytes);
             ++emitted;
         }
@@ -2438,8 +2475,55 @@ void ScanCloudSync(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_boo
             break;
         }
         const PathSizeSummary summary = ComputePathSizeLimited(root, 30000, cancelFlag);
+        // 大缓存检测(描述承诺"识别...大缓存",原实现完全缺失):浅层找名字含 cache/缓存/tmp/temp 的大子目录,
+        // 折叠进根 finding 明细——不另发体积承载 finding,以免与根 finding 的"全目录体积"在全局总量里重复计入
+        // (系统假设各 finding 互斥)。按目录包含关系去重,避免父子缓存目录在明细里重复。
+        QString cacheNote;
+        {
+            const QString rootKey = QDir::toNativeSeparators(QDir(root).absolutePath()).toCaseFolded();
+            QSet<QString> matchedRoots;
+            QStringList cacheHits;
+            QDirIterator it(root, QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDirIterator::Subdirectories);
+            int visited = 0;
+            while (it.hasNext() && cacheHits.size() < 6 && visited < 40000 && !IsCancelled(cancelFlag)) {
+                it.next();
+                ++visited;
+                const QFileInfo di = it.fileInfo();
+                const QString fn = di.fileName().toCaseFolded();
+                const bool cacheLike = fn.contains(QStringLiteral("cache")) || fn.contains(QStringLiteral("缓存")) ||
+                    fn.contains(QStringLiteral("temp")) || fn == QStringLiteral("tmp") || fn == QStringLiteral(".tmp");
+                if (!cacheLike) {
+                    continue;
+                }
+                const QString candKey = QDir::toNativeSeparators(di.absoluteFilePath()).toCaseFolded();
+                if (candKey == rootKey) {
+                    continue;  // 跳过根自身。
+                }
+                bool nested = false;
+                const QLatin1Char sep('\\');
+                for (const QString& m : matchedRoots) {
+                    if (candKey == m || candKey.startsWith(m + sep)) {
+                        nested = true;  // 已在某已纳入缓存目录内,不重复计入明细。
+                        break;
+                    }
+                }
+                if (nested) {
+                    continue;
+                }
+                const PathSizeSummary cs = ComputePathSizeLimited(di.absoluteFilePath(), 8000, cancelFlag);
+                if (cs.bytes < 256ULL * 1024ULL * 1024ULL) {
+                    continue;  // 未达 256 MiB 不算大缓存。
+                }
+                matchedRoots.insert(candKey);
+                cacheHits << QStringLiteral("%1（约 %2）").arg(di.fileName()).arg(FormatBytesText(cs.bytes));
+            }
+            if (!cacheHits.isEmpty()) {
+                cacheNote = QStringLiteral("；含大缓存：%1").arg(cacheHits.join(QStringLiteral("、")));
+            }
+        }
         AddFinding(out, FeatureModule::CloudSync, QFileInfo(root).fileName().isEmpty() ? root : QFileInfo(root).fileName(),
-                   QStringLiteral("同步目录"), QStringLiteral("本地同步目录占用估算；建议检查仅云端、冲突副本和重复下载。"),
+                   QStringLiteral("同步目录"),
+                   QStringLiteral("本地同步目录占用估算；建议检查仅云端、冲突副本和重复下载。") + cacheNote,
                    root, summary.bytes);
         QDirIterator iterator(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
         int conflicts = 0;
