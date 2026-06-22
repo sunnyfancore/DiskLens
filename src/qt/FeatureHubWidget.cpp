@@ -686,9 +686,10 @@ FindingSeverity SeverityForFinding(const FeatureFinding& finding) {
         state.contains(QStringLiteral("陈旧"))) {
         return FindingSeverity::Warning;
     }
-    // 健康状态(备份完整)不论体积多大都不应升级:bytes≥10GB 升 Notice 的规则是为"可清理的大块垃圾"设计的,
-    // 不适用于体检的"通过/良好"判定,避免把"备份良好"误显示成需要关注的提示级。
-    if (state.contains(QStringLiteral("备份完整"))) {
+    // 健康状态(备份完整)与媒体类型盘点(媒体分组)不论体积多大都不应升级:bytes≥10GB 升 Notice 的规则是为
+    // "可清理的大块垃圾"设计的;媒体分组是按类型的盘点直方图(大相册/视频库非可回收垃圾),不应被误显为提示级,
+    // 否则健康的媒体库会把治理分压向 0。
+    if (state.contains(QStringLiteral("备份完整")) || state.contains(QStringLiteral("媒体分组"))) {
         return FindingSeverity::Normal;
     }
     if (finding.bytes >= 10ULL * 1024ULL * 1024ULL * 1024ULL ||
@@ -1918,10 +1919,34 @@ bool IsMediaSuffix(const QString& suffix) {
  */
 void ScanMediaOrganizer(QVector<FeatureFinding>& out, const QString& sourcePath, std::shared_ptr<std::atomic_bool> cancelFlag) {
     const QString root = PathExists(sourcePath) ? sourcePath : StandardPathOrHome(QStandardPaths::PicturesLocation);
-    std::map<QString, std::pair<std::uint64_t, int>> byExt;
+    // 按描述"按媒体类型、年代和体积"三维度生成整理建议。原实现只做类型直方图,年代/体积维度缺失(详情甚至把
+    // "可按年份整理"甩给用户)。为避免同一文件体积在多个交叉维度分组里被重复计入全局总量/治理分(系统假设各
+    // finding 互斥、逐项 bytes 求和),此处以"类型"为唯一体积承载维度产出互斥 finding(求和=媒体总量),把
+    // "年代(文件修改年跨度)"与"体积(大视频)"两维度折叠进各类型 finding 的明细——既兑现描述承诺,又不重复计费、
+    // 不污染治理分。处置方案"按年份建目录 Photos\2026""大视频转归档盘"由明细的年代跨度与大视频计数支撑。
+    static const QSet<QString> videoSuffixes{
+        QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("mkv"), QStringLiteral("avi"), QStringLiteral("wmv")};
+    constexpr std::uint64_t kLargeVideoThreshold = 100ull * 1024 * 1024;  // 100 MiB 及以上视为大视频(可转归档盘)。
+    struct TypeBucket {
+        std::uint64_t bytes = 0;
+        int count = 0;
+        int earliestYear = 0;  // 该类型文件修改年最早(0=无有效年)。
+        int latestYear = 0;
+        std::uint64_t largeVideoBytes = 0;
+        int largeVideoCount = 0;
+    };
+    std::map<QString, TypeBucket> byExt;
     QDirIterator iterator(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
     int visited = 0;
-    while (iterator.hasNext() && visited < 150000 && !IsCancelled(cancelFlag)) {
+    bool truncated = false;
+    while (iterator.hasNext()) {
+        if (visited >= 150000) {
+            truncated = true;  // 命中枚举上限,以下体积/计数为下限。
+            break;
+        }
+        if (IsCancelled(cancelFlag)) {
+            break;
+        }
         iterator.next();
         ++visited;
         const QFileInfo info = iterator.fileInfo();
@@ -1929,15 +1954,51 @@ void ScanMediaOrganizer(QVector<FeatureFinding>& out, const QString& sourcePath,
         if (!IsMediaSuffix(suffix)) {
             continue;
         }
-        auto& bucket = byExt[suffix.isEmpty() ? QStringLiteral("无扩展名") : suffix];
-        bucket.first += static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
-        bucket.second += 1;
+        const std::uint64_t bytes = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
+        TypeBucket& bucket = byExt[suffix.isEmpty() ? QStringLiteral("无扩展名") : suffix];
+        bucket.bytes += bytes;
+        bucket.count += 1;
+        const int year = info.lastModified().date().year();
+        if (year > 1900 && year < 2100) {  // 仅采纳有效修改年(排除 0/异常年)。
+            if (bucket.earliestYear == 0 || year < bucket.earliestYear) {
+                bucket.earliestYear = year;
+            }
+            if (year > bucket.latestYear) {
+                bucket.latestYear = year;
+            }
+        }
+        if (videoSuffixes.contains(suffix) && bytes >= kLargeVideoThreshold) {
+            bucket.largeVideoBytes += bytes;
+            bucket.largeVideoCount += 1;
+        }
+    }
+    if (byExt.empty()) {
+        AddFinding(out, FeatureModule::MediaOrganizer, QStringLiteral("未发现媒体"),
+                   QStringLiteral("媒体分组"),
+                   QStringLiteral("所选目录未发现常见照片 / 视频文件。"),
+                   root, 0);
+        return;
     }
     for (const auto& item : byExt) {
+        const TypeBucket& bucket = item.second;
+        QString detail = QStringLiteral("共 %1 个文件").arg(bucket.count);
+        if (bucket.earliestYear > 0 && bucket.latestYear > 0) {
+            // 年代维度:折叠进明细(文件修改年跨度),支撑"按年份整理"建议,不另发体积承载 finding。
+            detail += bucket.earliestYear == bucket.latestYear
+                ? QStringLiteral("，年代 %1").arg(bucket.earliestYear)
+                : QStringLiteral("，年代 %1–%2").arg(bucket.earliestYear).arg(bucket.latestYear);
+        }
+        if (bucket.largeVideoCount > 0) {
+            // 体积维度:大视频计数+合计折叠进明细(仅视频类型),支撑"大视频转归档盘"建议。
+            detail += QStringLiteral("，含超过 100 MiB 的大视频 %1 个（约 %2，建议先转归档盘）")
+                          .arg(bucket.largeVideoCount)
+                          .arg(FormatBytesText(bucket.largeVideoBytes));
+        }
+        if (truncated) {
+            detail += QStringLiteral("（枚举上限内，体积/计数为下限）");
+        }
         AddFinding(out, FeatureModule::MediaOrganizer, QStringLiteral(".%1 媒体").arg(item.first),
-                   QStringLiteral("媒体分组"),
-                   QStringLiteral("共 %1 个文件，可按年份 / 设备 / 类型继续整理。").arg(item.second.second),
-                   root, item.second.first);
+                   QStringLiteral("媒体分组"), detail, root, bucket.bytes);
     }
 }
 
