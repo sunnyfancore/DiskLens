@@ -106,6 +106,11 @@ struct PathSizeSummary {
      * @brief 是否因数量上限截断。
      */
     bool truncated = false;
+
+    /**
+     * @brief 目录树中最新的文件修改时间(毫秒,UTC epoch);0 表示无文件或未取到。用于备份新鲜度比对等。
+     */
+    qint64 latestMtimeMsec = 0;
 };
 
 /**
@@ -183,7 +188,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("识别镜像缓存、卷和 WSL 虚拟磁盘")},
         {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"), QStringLiteral("按媒体类型、年代和体积生成整理建议")},
         {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套默认预算并标记超额位置")},
-        {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("检查重要目录是否缺少目标备份位置")},
+        {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本")},
         {FeatureModule::FileUnlocker, QStringLiteral("文件占用解锁器"), QStringLiteral("用 Windows Restart Manager 识别占用进程")},
         {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
         {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"), QStringLiteral("识别同步盘本地占用、冲突文件和大缓存")},
@@ -398,6 +403,7 @@ PathSizeSummary ComputePathSizeLimited(const QString& path, int maxEntries = 120
     if (info.isFile()) {
         summary.bytes = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
         summary.files = 1;
+        summary.latestMtimeMsec = info.lastModified().toMSecsSinceEpoch();
         return summary;
     }
 
@@ -417,6 +423,10 @@ PathSizeSummary ComputePathSizeLimited(const QString& path, int maxEntries = 120
         } else if (item.isFile()) {
             summary.bytes += static_cast<std::uint64_t>(std::max<qint64>(0, item.size()));
             ++summary.files;
+            const qint64 mtime = item.lastModified().toMSecsSinceEpoch();
+            if (mtime > summary.latestMtimeMsec) {
+                summary.latestMtimeMsec = mtime;
+            }
         }
         if (visited >= maxEntries) {
             summary.truncated = iterator.hasNext();
@@ -537,8 +547,15 @@ FindingSeverity SeverityForFinding(const FeatureFinding& finding) {
     if (state.contains(QStringLiteral("风险")) ||
         state.contains(QStringLiteral("超预算")) ||
         state.contains(QStringLiteral("缺口")) ||
-        state.contains(QStringLiteral("不足"))) {
+        state.contains(QStringLiteral("不足")) ||
+        state.contains(QStringLiteral("不完整")) ||
+        state.contains(QStringLiteral("陈旧"))) {
         return FindingSeverity::Warning;
+    }
+    // 健康状态(备份完整)不论体积多大都不应升级:bytes≥10GB 升 Notice 的规则是为"可清理的大块垃圾"设计的,
+    // 不适用于体检的"通过/良好"判定,避免把"备份良好"误显示成需要关注的提示级。
+    if (state.contains(QStringLiteral("备份完整"))) {
+        return FindingSeverity::Normal;
     }
     if (finding.bytes >= 10ULL * 1024ULL * 1024ULL * 1024ULL ||
         state.contains(QStringLiteral("虚拟磁盘")) ||
@@ -1486,6 +1503,44 @@ void ScanQuotaBudget(QVector<FeatureFinding>& out, const QString& sourcePath, st
 }
 
 /**
+ * @brief 探测本机是否存在"异地/历史"备份类在场信号(仅本地存在性检测,不联网、不上传)。
+ *
+ * 无本地备份目标时,给用户一个"可能已有异地副本"的参考;空列表表示未探测到任何信号。
+ * 读取本机目录/环境变量/本地注册表,均不触发任何网络访问,符合 LOCAL-ONLY 约束。
+ * @return 探测到的备份在场信号(展示文本)列表。
+ */
+QStringList ProbeAlternativeBackupPresence() {
+    QStringList found;
+    const QString home = QDir::homePath();
+    const QString oneDriveEnv = qEnvironmentVariable("OneDrive");
+    if (!oneDriveEnv.isEmpty() && QFileInfo::exists(oneDriveEnv)) {
+        found << QStringLiteral("OneDrive 同步");
+    } else if (QFileInfo::exists(home + QStringLiteral("/OneDrive"))) {
+        found << QStringLiteral("OneDrive 同步");
+    }
+    // iCloud:Windows 默认目录名带空格"iCloud Drive",旧版/部分版本为"iCloudDrive",两者都探测。
+    if (QFileInfo::exists(home + QStringLiteral("/iCloud Drive")) ||
+        QFileInfo::exists(home + QStringLiteral("/iCloudDrive"))) {
+        found << QStringLiteral("iCloud 云盘");
+    }
+    if (QFileInfo::exists(home + QStringLiteral("/Google Drive"))) {
+        found << QStringLiteral("Google Drive 同步");
+    }
+    if (QFileInfo::exists(home + QStringLiteral("/Dropbox"))) {
+        found << QStringLiteral("Dropbox 同步");
+    }
+    // File History:HKCU 配置键存在子项/子值即视为"配置过"(本地注册表读取,不联网,只读不写)。
+    // 注意:子键可能在停用后残留,故信号标注"已配置",最终是否仍有异地副本以模块级"可能"措辞兜底。
+    const QSettings fileHistory(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\FileHistory"),
+        QSettings::NativeFormat);
+    if (!fileHistory.childGroups().isEmpty() || !fileHistory.childKeys().isEmpty()) {
+        found << QStringLiteral("Windows 文件历史（已配置）");
+    }
+    return found;
+}
+
+/**
  * @brief 扫描备份缺口模块。
  * @param out 输出结果。
  * @param sourcePath 源路径。
@@ -1500,30 +1555,80 @@ void ScanBackupGap(QVector<FeatureFinding>& out, const QString& sourcePath, cons
     important.removeDuplicates();
     const bool hasTarget = PathExists(targetPath);
     if (!hasTarget) {
-        // 无目标盘时不可判定备份缺口:原行为会把每个重要目录都打成"备份缺口"(SeverityForFinding 命中
-        // Critical"备份缺口"),整列假性高严重度。改为单条中性"等待输入"提示,引导用户先选备份目标盘,
-        // 既有"有目标时逐目录核对"逻辑不变。
-        AddFinding(out, FeatureModule::BackupGap, QStringLiteral("请选择备份目标"), QStringLiteral("等待输入"),
-                   QStringLiteral("未设置备份目标盘，无法核对备份缺口。请在目标路径选择一个备份盘或目录后重新体检。"));
+        // 无本地目标盘时不可判定备份缺口(止血:不再把每个重要目录打成 Critical「备份缺口」)。额外探测
+        // 云盘/文件历史在场,给用户一个"可能已有异地副本"的参考,再引导其设置本地备份目标或确认同步状态。
+        const QStringList alt = ProbeAlternativeBackupPresence();
+        if (alt.isEmpty()) {
+            AddFinding(out, FeatureModule::BackupGap, QStringLiteral("请选择备份目标"), QStringLiteral("等待输入"),
+                       QStringLiteral("未设置本地备份目标盘，无法核对备份缺口。请在目标路径选择一个备份盘或目录后重新体检。"));
+        } else {
+            AddFinding(out, FeatureModule::BackupGap, QStringLiteral("未设本地备份目标"), QStringLiteral("等待输入"),
+                       QStringLiteral("未设置本地备份目标盘，无法核对备份缺口。检测到本机存在：%1——这些可能已为资料提供"
+                                      "异地副本，建议确认其同步状态后再决定是否补充本地备份。").arg(alt.join(QStringLiteral("、"))));
+        }
         return;
     }
+    // 以下阈值均为参考值,非权威标准;结论据此推断,非硬性判定。
+    constexpr int kCompleteRatioPct = 50;                            // 目标体积 < 源 50% 视为不完整(参考阈值)。
+    constexpr qint64 kStaleWindowMsec = 30LL * 24LL * 3600LL * 1000LL;  // 落后源 30 天视为陈旧(参考阈值)。
     for (const QString& path : ExistingPaths(important)) {
         if (IsCancelled(cancelFlag)) {
             break;
         }
-        const PathSizeSummary summary = ComputePathSizeLimited(path, 15000, cancelFlag);
-        const QString expectedBackup = QDir(targetPath).filePath(QFileInfo(path).fileName());
-        const bool backed = QFileInfo::exists(expectedBackup);
-        QString detail = backed
-            ? QStringLiteral("目标路径下存在同名备份目录，仍建议比对修改时间。")
-            : QStringLiteral("未在目标路径发现同名备份目录；磁盘健康异常时应优先处理。");
-        if (summary.truncated) {
-            detail += QStringLiteral("目录条目较多，已按扫描上限估算，实际占用可能更高。");
+        const PathSizeSummary source = ComputePathSizeLimited(path, 15000, cancelFlag);
+        const QString backupDir = QDir(targetPath).filePath(QFileInfo(path).fileName());
+        const QFileInfo backupInfo(backupDir);
+        const QString title = QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName();
+        QString state;
+        QString detail = QStringLiteral("备份目标：%1。").arg(QDir::toNativeSeparators(targetPath));
+        if (!backupInfo.isDir()) {
+            // 目标下不存在同名目录(或同名项是文件而非目录)→真实缺口,与源是否截断无关。
+            state = QStringLiteral("备份缺口");
+            detail += QStringLiteral("目标路径下未发现同名备份目录；磁盘健康异常时应优先处理。");
+            if (source.truncated) {
+                detail += QStringLiteral("源目录条目较多，体积为估算下限。");
+            }
+        } else {
+            const PathSizeSummary backup = ComputePathSizeLimited(backupDir, 15000, cancelFlag);
+            if (IsCancelled(cancelFlag)) {
+                break;  // 取消发生在两次计数之间:不再为本目录下结论,直接结束扫描。
+            }
+            const bool unreliable = (source.truncated || backup.truncated);
+            if (unreliable) {
+                // 部分计数不足以可靠判定完整度/新鲜度/是否为空——发中性"核对受限",不误报 Warning/Critical。
+                state = QStringLiteral("备份核对受限");
+                detail += QStringLiteral("源或目标目录条目较多，已按扫描上限估算，完整度、新鲜度与是否为空均无法可靠比对，建议人工核对。");
+            } else {
+                const bool sourceHasContent = (source.files > 0 || source.bytes > 0);
+                const bool backupEmpty = (backup.files == 0 && backup.bytes == 0);
+                const bool incomplete = (!backupEmpty && source.bytes > 0
+                                         && backup.bytes * 100 < source.bytes * static_cast<std::uint64_t>(kCompleteRatioPct));
+                const bool stale = (!backupEmpty && !incomplete && source.latestMtimeMsec > 0 && backup.latestMtimeMsec > 0
+                                    && source.latestMtimeMsec - backup.latestMtimeMsec > kStaleWindowMsec);
+                if (backupEmpty) {
+                    if (sourceHasContent) {
+                        state = QStringLiteral("备份缺口");
+                        detail += QStringLiteral("目标下同名备份目录未发现任何文件。");
+                    } else {
+                        state = QStringLiteral("备份完整");
+                        detail += QStringLiteral("源目录暂无可备份内容，无需核对。");
+                    }
+                } else if (incomplete) {
+                    state = QStringLiteral("备份不完整");
+                    const int pct = source.bytes > 0 ? static_cast<int>((backup.bytes * 100) / source.bytes) : 0;
+                    detail += QStringLiteral("目标备份体积约为源的 %1%（低于 %2% 参考阈值），疑似不完整。")
+                                  .arg(pct).arg(kCompleteRatioPct);
+                } else if (stale) {
+                    state = QStringLiteral("备份陈旧");
+                    const qint64 days = (source.latestMtimeMsec - backup.latestMtimeMsec) / (24LL * 3600LL * 1000LL);
+                    detail += QStringLiteral("目标备份最后更新早于源约 %1 天（超过 30 天参考阈值），建议刷新。").arg(days);
+                } else {
+                    state = QStringLiteral("备份完整");
+                    detail += QStringLiteral("目标下存在同名备份目录，体积与时效接近源。");
+                }
+            }
         }
-        AddFinding(out, FeatureModule::BackupGap, QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName(),
-                   backed ? QStringLiteral("发现备份目录") : QStringLiteral("备份缺口"),
-                   detail,
-                   path, summary.bytes);
+        AddFinding(out, FeatureModule::BackupGap, title, state, detail, path, source.bytes);
     }
 }
 
