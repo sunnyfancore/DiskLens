@@ -427,6 +427,66 @@ PathSizeSummary ComputePathSizeLimited(const QString& path, int maxEntries = 120
 }
 
 /**
+ * @brief 单个文件在磁盘上的真实占用(逻辑大小 vs 实占簇大小)。
+ *
+ * 用于 NTFS 压缩 / 稀疏文件(vhdx/vmdk/OST/Windows.old 等)的体积准确性:逻辑大小(QFileInfo::size)
+ * 会高估可回收空间,实占大小(GetCompressedFileSizeW 返回的压缩后簇占用)才反映真实磁盘占用。
+ */
+struct AllocatedBytes {
+    /** 文件逻辑大小(QFileInfo::size,字节)。 */
+    std::uint64_t logical = 0;
+    /** 文件实际占用磁盘的字节数(压缩/稀疏后的真实簇占用)。 */
+    std::uint64_t allocated = 0;
+    /** 是否为压缩或稀疏文件(allocated < logical,即逻辑大小被高估)。 */
+    bool sparse = false;
+};
+
+/**
+ * @brief 取文件在磁盘上的真实占用大小。
+ * @param path 文件路径。
+ * @return 逻辑/实占/是否稀疏;路径无效或取值失败时 allocated 回退为 logical。
+ *
+ * GetCompressedFileSizeW(kernel32,无需额外链接)对 NTFS 压缩/稀疏文件返回压缩后的实际簇占用,对普通
+ * 文件返回按簇对齐大小(≥ 逻辑大小)。按文档须用"返回值==INVALID_FILE_SIZE 且 GetLastError()!=NO_ERROR"
+ * 判定失败(0xFFFFFFFF 可能是超大文件的合法低位)。失败时回退 allocated=logical,保证调用方始终拿到
+ * 合理估值。sparse 判定用 allocated<logical(内容驱动,比属性位更贴合"大小是否被高估")。
+ */
+AllocatedBytes AllocatedBytesOnDisk(const QString& path) {
+    AllocatedBytes result;
+    const QFileInfo info(path);
+    result.logical = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
+    result.allocated = result.logical;  // 默认回退:即便取值失败也保证 allocated 合理。
+    if (path.trimmed().isEmpty() || !info.exists() || !info.isFile()) {
+        return result;
+    }
+    const std::wstring native = QDir::toNativeSeparators(info.absoluteFilePath()).toStdWString();
+    if (native.empty()) {
+        return result;
+    }
+    DWORD high = 0;
+    const DWORD low = GetCompressedFileSizeW(native.c_str(), &high);
+    if (low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) {
+        return result;  // 取值失败:保持 allocated = logical 回退。
+    }
+    const std::uint64_t allocated = (static_cast<std::uint64_t>(high) << 32) | static_cast<std::uint64_t>(low);
+    result.allocated = allocated;  // 调用已成功(失败在上方 INVALID_FILE_SIZE+GetLastError 处早退),0 是合法的"零占用"。
+    result.sparse = (result.allocated < result.logical);
+    return result;
+}
+
+/**
+ * @brief 将逻辑/实占大小格式化为对比文本。
+ * @param bytes AllocatedBytesOnDisk 的结果。
+ * @return 稀疏时如"逻辑 100.0 GB / 实占 1.2 GB(稀疏)";非稀疏时仅返回逻辑大小文本。
+ */
+QString FormatAllocatedText(const AllocatedBytes& bytes) {
+    if (!bytes.sparse || bytes.allocated >= bytes.logical) {
+        return FormatBytesText(bytes.logical);
+    }
+    return QStringLiteral("逻辑 %1 / 实占 %2(稀疏)").arg(FormatBytesText(bytes.logical), FormatBytesText(bytes.allocated));
+}
+
+/**
  * @brief 添加一条检测结果。
  * @param out 结果容器。
  * @param module 所属模块。
