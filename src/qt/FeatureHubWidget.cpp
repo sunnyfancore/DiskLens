@@ -885,8 +885,16 @@ void ScanGrowthTrace(QVector<FeatureFinding>& out, const QString& sourcePath, st
             break;
         }
         folderBytes[QFileInfo(file.path).absolutePath()] += file.bytes;
+        // 近期大文件多为普通文件;仅当 NTFS 压缩/稀疏(实占<逻辑)时在明细补"逻辑/实占",提醒磁盘实际占用
+        // 小于逻辑大小。bytes 保持逻辑大小不变(folderBytes 求和与"增长目录"口径一致、不扰动严重度/稳定键)。
+        QString detail = QStringLiteral("近 7 天修改的大文件，可能是空间增长来源。");
+        const AllocatedBytes ab = AllocatedBytesOnDisk(file.path);
+        if (ab.sparse) {
+            detail += QStringLiteral(" 该文件经 NTFS 压缩/稀疏,实占 %1(磁盘实际占用小于逻辑大小)。")
+                          .arg(FormatAllocatedText(ab));
+        }
         AddFinding(out, FeatureModule::GrowthTrace, file.name, QStringLiteral("近期写入"),
-                   QStringLiteral("近 7 天修改的大文件，可能是空间增长来源。"), file.path, file.bytes);
+                   detail, file.path, file.bytes);
     }
     for (const auto& pair : folderBytes) {
         if (pair.second >= 300ULL * 1024ULL * 1024ULL) {
@@ -2053,9 +2061,16 @@ void ScanMailArchive(QVector<FeatureFinding>& out, const QString& sourcePath, st
             if (bytes < 100ULL * 1024ULL * 1024ULL) {
                 continue;
             }
+            // PST/OST/MBOX 通常为普通文件(逻辑==实占);仅当 NTFS 压缩/稀疏(实占<逻辑)时在明细补"逻辑/实占",
+            // 提醒删除回收的是实占量。bytes 保持逻辑大小不变(不扰动体积口径/严重度/稳定键),纯明细增补。
+            QString detail = QStringLiteral("大型邮件归档或离线邮箱文件。处理前应先确认账户同步和备份状态。");
+            const AllocatedBytes ab = AllocatedBytesOnDisk(info.absoluteFilePath());
+            if (ab.sparse) {
+                detail += QStringLiteral(" 该文件经 NTFS 压缩/稀疏,实占 %1(删除可回收实占量,非逻辑大小)。")
+                              .arg(FormatAllocatedText(ab));
+            }
             AddFinding(out, FeatureModule::MailArchive, info.fileName(), QStringLiteral("邮件归档"),
-                       QStringLiteral("大型邮件归档或离线邮箱文件。处理前应先确认账户同步和备份状态。"),
-                       info.absoluteFilePath(), bytes);
+                       detail, info.absoluteFilePath(), bytes);
             ++emitted;
         }
     }
@@ -2098,13 +2113,19 @@ void ScanVirtualMachineImages(QVector<FeatureFinding>& out, const QString& sourc
             iterator.next();
             ++visited;
             const QFileInfo info = iterator.fileInfo();
-            const std::uint64_t bytes = static_cast<std::uint64_t>(std::max<qint64>(0, info.size()));
-            if (bytes < 1024ULL * 1024ULL * 1024ULL) {
+            const AllocatedBytes ab = AllocatedBytesOnDisk(info.absoluteFilePath());
+            // 动态虚拟磁盘(vhdx/vmdk/qcow2 等)的逻辑大小常远超实占(按需扩张),按逻辑报"可回收"会严重高估。
+            // 与 DockerWsl 一致改报实占(allocated):逻辑大小仅作发射门槛(免稀疏盘被挤出清单),bytes 用实占,
+            // 明细用 FormatAllocatedText 同时披露逻辑/实占。状态含"虚拟磁盘"以命中 SeverityForFinding 的 Notice
+            // 关键词——实占跌破 10GB 升 Notice 的字节阈值时,靠关键词保持与通用虚拟盘一致的提示级可见性。
+            if (ab.logical < 1024ULL * 1024ULL * 1024ULL) {
                 continue;
             }
             AddFinding(out, FeatureModule::VirtualMachineImages, info.fileName(), QStringLiteral("虚拟磁盘"),
-                       QStringLiteral("大型虚拟机磁盘。建议通过对应虚拟化软件迁移、压缩或清理快照。"),
-                       info.absoluteFilePath(), bytes);
+                       QStringLiteral("大型虚拟机磁盘。建议通过对应虚拟化软件迁移、压缩或清理快照。实占 %1。"
+                                      "实际可回收量取决于虚拟盘内部空闲度,此处为当前占用而非可回收保证。")
+                           .arg(FormatAllocatedText(ab)),
+                       info.absoluteFilePath(), ab.allocated);
             ++emitted;
         }
     }
@@ -2893,9 +2914,10 @@ QVector<FeatureFinding> BuildFindings(const QVector<FeatureModule>& modules, con
     }
 
     // 跨模块 vhdx 归属去重:`wsl --import` 导入的发行版常把 ext4.vhdx 放在 Documents 等位置,会被
-    // DockerWsl(Lxss 注册表权威归属 + 实占体积)与 VirtualMachineImages(Documents 通用 *.vhdx 扫描 +
-    // 逻辑体积)同时报告,造成同一文件双计、归属冲突与体积口径不一。以 DockerWsl 的归属为准,移除
-    // VirtualMachineImages 中指向同一 vhdx 的重复项(DockerWsl 信息更准确:命名发行版 + 实占 + 压缩建议)。
+    // DockerWsl(Lxss 注册表权威归属)与 VirtualMachineImages(Documents 通用 *.vhdx 扫描)同时报告,
+    // 造成同一文件双计与归属冲突。两者现均报实占体积(D6 起 VirtualMachineImages 改用 allocated,与
+    // DockerWsl 同口径),故去重主因不再是"口径不一"而是避免双计。以 DockerWsl 的归属为准,移除
+    // VirtualMachineImages 中指向同一 vhdx 的重复项(DockerWsl 信息更丰富:命名发行版 + 实占 + 压缩建议)。
     {
         QSet<QString> dockerWslVhdx;
         for (const FeatureFinding& f : out) {
