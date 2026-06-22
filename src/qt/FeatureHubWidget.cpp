@@ -51,7 +51,15 @@
 #include <Windows.h>
 #include <RestartManager.h>
 #include <objbase.h>
+#include <ole2.h>
+#include <olectl.h>
 #include <shlobj.h>
+// initguid 必须在 dskquota.h 之前:使 dskquota.h 内的 DEFINE_GUID 在本 TU 内"定义"CLSID_DiskQuotaControl /
+// IID_IDiskQuotaControl 等,从而无需链接 dskquota.lib(不改 CMakeLists)。ole2.h/olectl.h 已在其前包含,
+// 故 dskquota.h 内部的 #ifndef 守卫会跳过它们——确保 initguid 只作用于 dskquota 自有的冷门 GUID(不在
+// uuid.lib 中),不与 ole2/olectl 的 GUID 重复定义。
+#include <initguid.h>
+#include <dskquota.h>
 
 #include <algorithm>
 #include <array>
@@ -189,7 +197,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"), QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境")},
         {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘并核算真实占用,提示压缩 / prune 途径")},
         {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"), QStringLiteral("按媒体类型、年代和体积生成整理建议")},
-        {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套默认预算并标记超额位置")},
+        {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套参考预算并标记超额位置,另只读查询 NTFS 卷配额启用状态")},
         {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本")},
         {FeatureModule::FileUnlocker, QStringLiteral("文件占用解锁器"), QStringLiteral("用 Windows Restart Manager 识别占用进程")},
         {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
@@ -1881,6 +1889,77 @@ void ScanMediaOrganizer(QVector<FeatureFinding>& out, const QString& sourcePath,
 }
 
 /**
+ * @brief NTFS 卷配额查询结果(IDiskQuotaControl 只读)。
+ */
+struct NtfsQuotaInfo {
+    /** GetQuotaState 经 DISKQUOTA_STATE_MASK:0=禁用,1=跟踪,2=强制。 */
+    DWORD state = 0;
+    /** 卷默认配额上限(字节);<0 表示无上限。 */
+    long long defaultLimit = -1;
+    /** 卷默认配额警告阈值(字节);<0 表示无上限。 */
+    long long defaultThreshold = -1;
+};
+
+/**
+ * @brief 只读查询一个 NTFS 卷的配额状态。
+ * @param volumeRoot 卷根路径(如 "C:\\")。
+ * @param hasData [out] 是否成功取到配额数据(COM 不可用 / 非 NTFS / 初始化失败时为 false)。
+ * @return 配额信息(hasData 为 false 时内容无意义)。
+ *
+ * 用 IDiskQuotaControl::Initialize(volumeRoot, FALSE) 只读打开卷,GetQuotaState 取启用状态,
+ * GetDefaultQuotaLimit / GetDefaultQuotaThreshold 取卷默认配额。NTFS 配额在多数家用机器上默认关闭,
+ * 此时 hasData=true 但 state=禁用。全程只读,绝不调用 Set* / AddUser* / DeleteUser 等写入接口。COM 在
+ * 后台 std::thread 上按需 CoInitializeEx / CoUninitialize:weInitialized 仅在本次确实以 S_OK 初始化时
+ * 反初始化,S_FALSE(同线程已初始化,如 lnk 解析)与 RPC_E_CHANGED_MODE(套间不符)均不反初始化、后者
+ * 直接放弃查询以避免跨套间调用风险。任一 COM 步骤失败立即释放并返回 hasData=false,调用方降级到启发式预算。
+ */
+NtfsQuotaInfo QueryNtfsQuotaForVolume(const QString& volumeRoot, bool& hasData) {
+    hasData = false;
+    NtfsQuotaInfo info;
+    const HRESULT hrInit = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (hrInit == RPC_E_CHANGED_MODE) {
+        return info;  // 线程套间不符,放弃查询(不强制切换以免破坏同线程既有 COM 状态)。
+    }
+    const bool weInitialized = (hrInit == S_OK);  // S_FALSE=同线程已初始化,不反初始化。
+    if (hrInit != S_OK && hrInit != S_FALSE) {
+        return info;  // 其它失败码视为 COM 不可用。
+    }
+
+    IDiskQuotaControl* control = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_DiskQuotaControl, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IDiskQuotaControl, reinterpret_cast<void**>(&control));
+    if (FAILED(hr) || control == nullptr) {
+        if (weInitialized) {
+            CoUninitialize();
+        }
+        return info;
+    }
+
+    const std::wstring rootW = QDir::toNativeSeparators(volumeRoot).toStdWString();
+    hr = control->Initialize(rootW.c_str(), FALSE);  // 只读。
+    if (SUCCEEDED(hr)) {
+        DWORD state = 0;
+        if (SUCCEEDED(control->GetQuotaState(&state))) {
+            info.state = state & DISKQUOTA_STATE_MASK;
+            hasData = true;
+            long long limit = -1;
+            if (SUCCEEDED(control->GetDefaultQuotaLimit(&limit))) {
+                info.defaultLimit = limit;
+            }
+            long long threshold = -1;
+            if (SUCCEEDED(control->GetDefaultQuotaThreshold(&threshold))) {
+                info.defaultThreshold = threshold;
+            }
+        }
+    }
+    control->Release();
+    if (weInitialized) {
+        CoUninitialize();
+    }
+    return info;
+}
+
+/**
  * @brief 扫描目录预算模块。
  * @param out 输出结果。
  * @param sourcePath 源路径。
@@ -1904,8 +1983,9 @@ void ScanQuotaBudget(QVector<FeatureFinding>& out, const QString& sourcePath, st
         }
         const PathSizeSummary summary = ComputePathSizeLimited(budget.path, 20000, cancelFlag);
         const bool over = summary.bytes > budget.budgetBytes;
-        // 说明里明确这是"建议预算(参考值)"而非系统实测配额——NTFS 真实配额查询留给后续批次;当前硬
-        // 编码预算不可被读成"系统认定的配额"。截断时 bytes 是下限估算,需告知用户实际可能更高。
+        // 说明里明确这是"建议预算(参考值)"——硬编码预算不可被读成"系统认定的配额"。NTFS 真实配额状态
+        // 由下方 QueryNtfsQuotaForVolume 另行只读查询并在独立条目中如实报告。截断时 bytes 是下限估算,
+        // 需告知用户实际可能更高。
         QString detail = QStringLiteral("建议预算 %1（参考值，非系统实测配额），当前约 %2。")
                              .arg(FormatBytesText(budget.budgetBytes), FormatBytesText(summary.bytes));
         if (summary.truncated) {
@@ -1915,6 +1995,61 @@ void ScanQuotaBudget(QVector<FeatureFinding>& out, const QString& sourcePath, st
                    over ? QStringLiteral("超预算") : QStringLiteral("预算内"),
                    detail,
                    budget.path, summary.bytes);
+    }
+
+    // NTFS 卷配额状态(只读 IDiskQuotaControl):对预算目录所在卷查询真实配额启用状态与卷默认上限,作为
+    // 上方"参考预算"的补充。多数家用机器 NTFS 配额默认关闭→如实报"未启用";启用时报卷默认上限。任一卷
+    // COM 查询失败静默降级(发中性"配额查询不可用"),不影响预算条目。按卷去重(预算目录常同在系统盘)。
+    QSet<QString> queriedRoots;
+    for (const Budget& budget : budgets) {
+        if (IsCancelled(cancelFlag)) {
+            break;
+        }
+        const QStorageInfo volume(budget.path);
+        if (!volume.isValid() || volume.fileSystemType() != "NTFS") {
+            continue;  // 仅 NTFS 支持配额;非 NTFS / 无效卷跳过。
+        }
+        const QString root = QDir::toNativeSeparators(volume.rootPath());
+        if (root.isEmpty() || queriedRoots.contains(root)) {
+            continue;
+        }
+        queriedRoots << root;
+
+        bool hasData = false;
+        const NtfsQuotaInfo quota = QueryNtfsQuotaForVolume(root, hasData);
+        if (!hasData) {
+            AddFinding(out, FeatureModule::QuotaBudget, QStringLiteral("%1 配额").arg(root),
+                       QStringLiteral("配额查询不可用"),
+                       QStringLiteral("无法通过 NTFS 配额接口读取 %1 的配额状态(可能权限不足或接口不可用)。"
+                                      "上方目录预算为参考建议值,非系统强制限额。").arg(root));
+            continue;
+        }
+
+        QString stateText;
+        QString detail;
+        const bool enforced = (quota.state == DISKQUOTA_STATE_ENFORCE);
+        if (enforced) {
+            stateText = QStringLiteral("NTFS 配额（强制）");
+        } else if (quota.state == DISKQUOTA_STATE_TRACK) {
+            stateText = QStringLiteral("NTFS 配额（跟踪）");
+        } else {
+            stateText = QStringLiteral("NTFS 配额（未启用）");
+        }
+        if (quota.state == DISKQUOTA_STATE_DISABLED) {
+            detail = QStringLiteral("%1 的 NTFS 配额当前未启用,卷上用户不受系统配额限制。上方目录预算为参考"
+                                    "建议值,可在「卷属性 → 配额」中启用 NTFS 配额由系统强制。").arg(root);
+        } else {
+            const QString limitText = (quota.defaultLimit < 0)
+                ? QStringLiteral("无上限")
+                : FormatBytesText(static_cast<std::uint64_t>(quota.defaultLimit));
+            // 卷默认上限适用于"无显式条目的用户",并非当前用户的专属条目,如实标注以免误解。
+            detail = QStringLiteral("%1 的 NTFS 配额已%2,卷默认配额上限 %3(适用于无显式条目的用户,非当前"
+                                    "用户的专属条目)。上方目录预算为参考建议值。")
+                         .arg(root,
+                              enforced ? QStringLiteral("强制") : QStringLiteral("跟踪"),
+                              limitText);
+        }
+        AddFinding(out, FeatureModule::QuotaBudget, QStringLiteral("%1 配额").arg(root), stateText, detail);
     }
 }
 
@@ -3662,7 +3797,7 @@ QString FeatureHubWidget::BuildActionPlanText(const FeatureFinding& finding) con
         lines << QStringLiteral("3. 大视频建议先转移到归档盘，再用备份缺口检查确认有副本。");
         break;
     case FeatureModule::QuotaBudget:
-        lines << QStringLiteral("1. 这里的“预算”是参考建议值，并非系统实测配额（NTFS 真实配额需另行查询）。");
+        lines << QStringLiteral("1. 这里的“预算”是参考建议值；NTFS 卷配额的启用状态与卷默认上限已另行只读查询并列出（多为“未启用”）。");
         lines << QStringLiteral("2. 若目录明显超出建议预算，可按“保留 / 归档 / 可删除缓存”三类取舍，不必视为硬性限额。");
         lines << QStringLiteral("3. 后续可把该目录加入周期重扫，超阈值时提示。");
         break;
