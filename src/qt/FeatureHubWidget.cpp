@@ -199,7 +199,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"), QStringLiteral("按媒体类型、年代和体积生成整理建议")},
         {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套参考预算并标记超额位置,另只读查询 NTFS 卷配额启用状态")},
         {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本")},
-        {FeatureModule::FileUnlocker, QStringLiteral("文件占用解锁器"), QStringLiteral("用 Windows Restart Manager 识别占用进程")},
+        {FeatureModule::FileUnlocker, QStringLiteral("文件占用识别器"), QStringLiteral("用 Windows Restart Manager 识别占用进程（仅识别不自动解锁）")},
         {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
         {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"), QStringLiteral("识别同步盘本地占用、冲突文件和大缓存")},
         {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("发现 Windows.old、更新备份和卷影副本入口")},
@@ -2557,9 +2557,15 @@ QStringList QueryLockingProcesses(const QString& path) {
 }
 
 /**
- * @brief 扫描文件占用解锁器模块。
+ * @brief 扫描文件占用识别器模块。
+ *
+ * 用 Windows Restart Manager **识别**(只读查询,不自动解锁)占用指定文件/目录的进程。目录扫描受抽样
+ * 上限约束(Restart Manager 每文件一会话有开销),仅抽查前 kMaxSampleFiles 个文件;抽查未命中时明细如实
+ * 标注“仅抽查样本”,避免对文件较多的目录误报“未发现占用”的绝对结论。
+ *
  * @param out 输出结果。
  * @param sourcePath 源路径。
+ * @param cancelFlag 取消标志。
  */
 void ScanFileUnlocker(QVector<FeatureFinding>& out, const QString& sourcePath, std::shared_ptr<std::atomic_bool> cancelFlag) {
     if (!PathExists(sourcePath)) {
@@ -2568,16 +2574,20 @@ void ScanFileUnlocker(QVector<FeatureFinding>& out, const QString& sourcePath, s
         return;
     }
 
+    constexpr int kMaxSampleFiles = 30;  // Restart Manager 每文件一会话有开销,目录扫描仅抽查上限
     QStringList targets;
+    bool truncated = false;
     const QFileInfo info(sourcePath);
     if (info.isFile()) {
         targets << info.absoluteFilePath();
     } else {
         QDirIterator iterator(sourcePath, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
-        while (iterator.hasNext() && targets.size() < 30 && !IsCancelled(cancelFlag)) {
+        while (iterator.hasNext() && targets.size() < kMaxSampleFiles && !IsCancelled(cancelFlag)) {
             iterator.next();
             targets << iterator.filePath();
         }
+        // 循环结束时仍有更多文件 → 被抽样上限截断(目录文件多于上限),其后结论须就“样本”而非全量下。
+        truncated = iterator.hasNext();
     }
 
     int locked = 0;
@@ -2590,13 +2600,24 @@ void ScanFileUnlocker(QVector<FeatureFinding>& out, const QString& sourcePath, s
             continue;
         }
         ++locked;
+        // 仅识别占用进程,不自动解锁;释放需用户手动关闭对应进程(处置方案给出操作步骤)。
         AddFinding(out, FeatureModule::FileUnlocker, QFileInfo(target).fileName(), QStringLiteral("被占用"),
-                   QStringLiteral("占用进程：%1。").arg(processes.join(QStringLiteral("、"))),
+                   QStringLiteral("占用进程：%1。本工具仅识别占用、不自动解锁，如需释放请手动关闭对应进程。").arg(processes.join(QStringLiteral("、"))),
                    target, static_cast<std::uint64_t>(std::max<qint64>(0, QFileInfo(target).size())));
     }
+
+    const QString sourceTitle = QFileInfo(sourcePath).fileName().isEmpty() ? sourcePath : QFileInfo(sourcePath).fileName();
     if (locked == 0) {
-        AddFinding(out, FeatureModule::FileUnlocker, QFileInfo(sourcePath).fileName().isEmpty() ? sourcePath : QFileInfo(sourcePath).fileName(),
-                   QStringLiteral("未发现占用"), QStringLiteral("Restart Manager 未发现当前路径样本被进程占用。"), sourcePath, 0);
+        // 抽样截断时不得断言“未发现占用”绝对结论——仅能就抽查样本下结论,免对文件较多的目录误报。
+        const QString emptyDetail = truncated
+            ? QStringLiteral("抽查的前 %1 个文件样本中未发现占用进程；目录文件较多，仅抽查样本，可能存在未被抽查的占用文件，可缩小到具体子目录或单文件再查。").arg(targets.size())
+            : QStringLiteral("Restart Manager 未发现当前路径被进程占用。");
+        AddFinding(out, FeatureModule::FileUnlocker, sourceTitle, QStringLiteral("未发现占用"), emptyDetail, sourcePath, 0);
+    } else if (truncated) {
+        // 命中占用但目录文件多于抽样上限 → 明示抽查范围(不静默截断),免误以为已排查全部文件。
+        AddFinding(out, FeatureModule::FileUnlocker, QStringLiteral("更多文件未抽查"), QStringLiteral("抽查上限"),
+                   QStringLiteral("目录文件较多，仅用 Restart Manager 抽查了前 %1 个文件。如需完整排查，请缩小源路径到具体子目录或单文件。").arg(targets.size()),
+                   sourcePath, 0);
     }
 }
 
