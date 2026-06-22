@@ -905,8 +905,14 @@ void ScanGrowthTrace(QVector<FeatureFinding>& out, const QString& sourcePath, st
  * @brief 从注册表读取已安装软件记录。
  * @param registryRoot 卸载项注册表根。
  * @param out 输出结果。
+ * @param measuredInstallDirs 跨 hive 累计的“已实测安装目录”键(NormalizeKeyPath 后)。不同
+ *        DisplayName 共享同一安装目录时(如某套件主程序与其更新器都指向同一根,或 32/64 位视图
+ *        重复登记)只计一次,避免对同一目录重复实测抬升全局 totalBytes —— 系统导出/治理按逐项
+ *        finding.bytes 求和且假设各 finding 互斥(见 D1/D2 不变式)。
+ * @param cancelFlag 取消标志。
  */
 void CollectInstalledSoftwareFromRegistry(const QString& registryRoot, QVector<FeatureFinding>& out,
+                                          QSet<QString>& measuredInstallDirs,
                                           std::shared_ptr<std::atomic_bool> cancelFlag) {
     QSettings registry(registryRoot, QSettings::NativeFormat);
     const QStringList groups = registry.childGroups();
@@ -924,17 +930,51 @@ void CollectInstalledSoftwareFromRegistry(const QString& registryRoot, QVector<F
         if (name.isEmpty()) {
             continue;
         }
-        std::uint64_t bytes = static_cast<std::uint64_t>(estimatedKb) * 1024ULL;
         QString detail = publisher.isEmpty()
             ? QStringLiteral("来自系统卸载注册表。")
             : QStringLiteral("发布者：%1。").arg(publisher);
-        QString path = installLocation;
-        if (bytes == 0 && PathExists(path)) {
+        const QString path = installLocation;
+        std::uint64_t bytes = 0;
+
+        // 安装目录存在 → 以**实测真实占用**为准。模块名为“软件体积管理器”、描述承诺“安装目录真实占用”,
+        // 故目录在就量目录,而非直接采信注册表 EstimatedSize —— 该值由各安装器一次性写入、常不更新且
+        // 不含用户数据,系统性偏低(原逻辑把它当主数,仅在其为 0 时才量目录,正是名实不符根因)。注册表
+        // 估算值仅在目录缺失/实测为空时回退并注明来源(truth-in-labeling)。标题(name)与状态(已安装软件)
+        // 均不变 → v2 稳定键不漂移、严重度关键词无扰动。
+        if (PathExists(path)) {
+            const QString pathKey = NormalizeKeyPath(path);
+            if (!pathKey.isEmpty()) {
+                // 去重:不仅精确同目录,还按“目录包含关系”判定(镜像 ComputeStartupProgramFootprint 的
+                // seenDirs 逻辑)——若本目录与某已统计目录互为父子(如 Vendor\ 与 Vendor\Helper\,父目录递归
+                // 统计已含子目录),则视为同一安装树,体积只在先计入的入口统计,免子树被重复累加进全局
+                // totalBytes(系统导出/治理按逐项 bytes 求和假设互斥,见 D1/D2 不变式)。
+                const QLatin1Char sep('\\');
+                bool nestedWithSeen = false;
+                for (const QString& seen : measuredInstallDirs) {
+                    if (seen == pathKey || pathKey.startsWith(seen + sep) || seen.startsWith(pathKey + sep)) {
+                        nestedWithSeen = true;
+                        break;
+                    }
+                }
+                if (nestedWithSeen) {
+                    continue;
+                }
+                measuredInstallDirs.insert(pathKey);
+            }
             const PathSizeSummary summary = ComputePathSizeLimited(path, 8000, cancelFlag);
             bytes = summary.bytes;
             if (summary.truncated) {
-                detail += QStringLiteral(" 安装目录较大，已按上限估算。");
+                detail += QStringLiteral(" 安装目录较大，已按上限估算（实际可能更高）。");
             }
+            if (bytes == 0 && estimatedKb > 0) {
+                // 目录在但实测为空/不可访问(权限/reparse/已卸载残留空目录),回退注册表估算值并注明。
+                bytes = static_cast<std::uint64_t>(estimatedKb) * 1024ULL;
+                detail += QStringLiteral(" 目录实测为空或不可访问，体积改用注册表估算值（可能不准）。");
+            }
+        } else if (estimatedKb > 0) {
+            // 无安装目录(便携软件/部分卸载的残留注册表项),仅给注册表估算值并注明。
+            bytes = static_cast<std::uint64_t>(estimatedKb) * 1024ULL;
+            detail += QStringLiteral(" 无安装目录信息，体积为注册表估算值（可能不准）。");
         }
         if (bytes < 50ULL * 1024ULL * 1024ULL && path.isEmpty()) {
             continue;
@@ -948,9 +988,10 @@ void CollectInstalledSoftwareFromRegistry(const QString& registryRoot, QVector<F
  * @param out 输出结果。
  */
 void ScanSoftwareFootprint(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_bool> cancelFlag) {
-    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, cancelFlag);
-    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, cancelFlag);
-    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, cancelFlag);
+    QSet<QString> measuredInstallDirs;
+    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, measuredInstallDirs, cancelFlag);
+    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, measuredInstallDirs, cancelFlag);
+    CollectInstalledSoftwareFromRegistry(QStringLiteral("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"), out, measuredInstallDirs, cancelFlag);
 }
 
 /**
