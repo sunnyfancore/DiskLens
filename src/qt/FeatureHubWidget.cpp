@@ -187,7 +187,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型整理下载和桌面文件（可在源路径追加目录）")},
         {FeatureModule::PrivacyRadar, QStringLiteral("隐私文件雷达"), QStringLiteral("发现密钥、证书、合同和身份信息等敏感文件")},
         {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"), QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境")},
-        {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("识别镜像缓存、卷和 WSL 虚拟磁盘")},
+        {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘并核算真实占用,提示压缩 / prune 途径")},
         {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"), QStringLiteral("按媒体类型、年代和体积生成整理建议")},
         {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套默认预算并标记超额位置")},
         {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本")},
@@ -548,6 +548,25 @@ QString FormatAllocatedText(const AllocatedBytes& bytes) {
         return FormatBytesText(bytes.logical);
     }
     return QStringLiteral("逻辑 %1 / 实占 %2(稀疏)").arg(FormatBytesText(bytes.logical), FormatBytesText(bytes.allocated));
+}
+
+/**
+ * @brief 将磁盘文件路径归一化为去重键。
+ * @param path 原始路径(可能来自注册表带 \\?\ 前缀,或来自文件枚举无前缀)。
+ * @return 归一化键(剥离长路径前缀、统一反斜杠、大小写不敏感)。
+ *
+ * \\?\ 前缀会跳过 Win32 的 / → \ 归一化(见长路径前缀经验),故须先剥离前缀再做 toNativeSeparators,
+ * 否则带前缀(WSL 注册表 BasePath)与不带前缀(文件系统枚举)的同一路径会被判为不同文件,导致跨来源
+ * 重复计费。用于 WSL 发行版 vhdx 的模块内去重与跨模块(DockerWsl vs VirtualMachineImages)归属去重。
+ */
+QString NormalizeDiskPathKey(const QString& path) {
+    QString s = path;
+    if (s.startsWith(QStringLiteral("\\\\?\\"))) {
+        s = s.mid(4);
+    } else if (s.startsWith(QStringLiteral("\\\\.\\"))) {
+        s = s.mid(4);
+    }
+    return QDir::toNativeSeparators(s).toCaseFolded();
 }
 
 /**
@@ -1131,34 +1150,186 @@ void ScanDeveloperSpace(QVector<FeatureFinding>& out, const QString& sourcePath,
 }
 
 /**
- * @brief 扫描 Docker 和 WSL 空间管理模块。
- * @param out 输出结果。
+ * @brief 一个 WSL2 发行版的虚拟磁盘信息(Lxss 注册表解析结果)。
  */
-void ScanDockerWsl(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_bool> cancelFlag) {
-    QStringList candidates;
-    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
-    candidates << localAppData + QStringLiteral("/Docker");
-    candidates << localAppData + QStringLiteral("/Packages");
-    candidates << QDir::homePath() + QStringLiteral("/AppData/Local/Docker");
-    for (const QString& root : ExistingPaths(candidates)) {
+struct WslDistroVhdx {
+    /** 发行版名称(DistributionName;缺失时回退为注册表子键名)。 */
+    QString distroName;
+    /** 解析出的根文件系统 vhdx 路径(无法解析时为空,调用方应跳过)。 */
+    QString vhdxPath;
+    /** 是否为 Docker Desktop 的内部发行版(docker-desktop / docker-desktop-data)。 */
+    bool isDockerData = false;
+};
+
+/**
+ * @brief 枚举本机已注册的 WSL2 发行版及其虚拟磁盘。
+ * @param cancelFlag 取消标志。
+ * @return 发行版列表(含 Docker Desktop 的内部发行版)。
+ *
+ * 读取 HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss 下每个 {GUID} 子键的 DistributionName /
+ * BasePath / VhdFileName,组合出 ext4.vhdx 路径。这是 WSL2 的权威来源:Store 版 Ubuntu/Debian 等用户
+ * 发行版,以及 Docker Desktop 的 docker-desktop / docker-desktop-data 两个内部发行版,都在此登记。
+ * 纯本地只读注册表访问,不联网、不启动 wsl.exe。BasePath 可能带 \\?\ 长路径前缀,QFileInfo 与
+ * GetCompressedFileSizeW 均支持,直接透传。
+ */
+QVector<WslDistroVhdx> EnumerateWslDistros(std::shared_ptr<std::atomic_bool> cancelFlag) {
+    QVector<WslDistroVhdx> distros;
+    QSettings lxss(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss"),
+        QSettings::NativeFormat);
+    const QStringList guids = lxss.childGroups();
+    for (const QString& guid : guids) {
         if (IsCancelled(cancelFlag)) {
             break;
         }
-        QDirIterator iterator(root, QStringList{QStringLiteral("*.vhdx")}, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
-        while (iterator.hasNext() && !IsCancelled(cancelFlag)) {
-            iterator.next();
-            const QFileInfo info = iterator.fileInfo();
-            AddFinding(out, FeatureModule::DockerWsl, info.fileName(), QStringLiteral("虚拟磁盘"),
-                       QStringLiteral("Docker / WSL 虚拟磁盘。可在确认停止相关发行版后执行压缩或 prune。"),
-                       info.absoluteFilePath(), static_cast<std::uint64_t>(std::max<qint64>(0, info.size())));
+        lxss.beginGroup(guid);
+        const QString name = lxss.value(QStringLiteral("DistributionName")).toString();
+        const QString basePath = lxss.value(QStringLiteral("BasePath")).toString();
+        const QString vhdName = lxss.value(QStringLiteral("VhdFileName")).toString();
+        lxss.endGroup();
+        if (basePath.isEmpty()) {
+            continue;  // 无 BasePath 的子键不是有效发行版。
+        }
+        // 解析 vhdx 路径:BasePath + VhdFileName(缺省 ext4.vhdx);失败依次回退到缺省名 / BasePath 本身。
+        const QString vhd = vhdName.isEmpty() ? QStringLiteral("ext4.vhdx") : vhdName;
+        QString vhdxPath = basePath + QStringLiteral("\\") + vhd;
+        if (!QFileInfo::exists(vhdxPath)) {
+            const QString defaultName = basePath + QStringLiteral("\\ext4.vhdx");
+            if (vhdName.compare(QStringLiteral("ext4.vhdx"), Qt::CaseInsensitive) != 0 && QFileInfo::exists(defaultName)) {
+                vhdxPath = defaultName;
+            } else if (basePath.endsWith(QStringLiteral(".vhdx"), Qt::CaseInsensitive) && QFileInfo::exists(basePath)) {
+                vhdxPath = basePath;  // 极少数布局:BasePath 直接就是 vhdx 文件。
+            } else {
+                vhdxPath.clear();  // 无法解析,跳过(不臆造体积)。
+            }
+        }
+
+        WslDistroVhdx d;
+        d.distroName = name.isEmpty() ? guid : name;
+        d.vhdxPath = vhdxPath;
+        const QString lower = d.distroName.toCaseFolded();
+        d.isDockerData = (lower == QStringLiteral("docker-desktop") ||
+                          lower == QStringLiteral("docker-desktop-data") ||
+                          lower == QStringLiteral("docker-desktop-proxy"));
+        distros.append(d);
+    }
+    return distros;
+}
+
+/**
+ * @brief 扫描 Docker 和 WSL 空间管理模块。
+ * @param out 输出结果。
+ * @param cancelFlag 取消标志。
+ *
+ * 原实现仅盲扫候选目录下的 *.vhdx(逻辑大小)并把 docker.exe 探测当占位提示,既不知某个 vhdx 属于哪个
+ * WSL 发行版 / Docker,又因逻辑大小高估占用。本实现:① 以 Lxss 注册表为权威来源枚举 WSL2 发行版(含
+ * Docker Desktop 的内部发行版),按发行版 / Docker 归属命名并用 AllocatedBytesOnDisk 核算真实占用;
+ * ② 对未登记的 Docker 目录 vhdx 做去重兜底扫描;③ 探测 Docker Engine(Windows 服务)的镜像层目录
+ * (daemon.json 的 data-root 或 %ProgramData%\docker);④ docker.exe 探测改为如实告知可用 docker system df
+ * 自查可回收明细——本工具不自动执行该子进程,以免弹出控制台窗口并依赖守护进程在线。全程只读,绝不 prune。
+ */
+void ScanDockerWsl(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_bool> cancelFlag) {
+    QSet<QString> seenVhdx;  // 模块内去重(本函数内);跨模块去重见 BuildFindings 末尾。
+
+    // ① WSL2 发行版(Lxss 注册表权威来源;含 Docker Desktop 内部发行版)。
+    const QVector<WslDistroVhdx> distros = EnumerateWslDistros(cancelFlag);
+    for (const WslDistroVhdx& d : distros) {
+        if (IsCancelled(cancelFlag)) {
+            break;
+        }
+        if (d.vhdxPath.isEmpty()) {
+            continue;
+        }
+        seenVhdx << NormalizeDiskPathKey(d.vhdxPath);
+        const AllocatedBytes ab = AllocatedBytesOnDisk(d.vhdxPath);
+        const QString title = d.isDockerData ? QStringLiteral("Docker Desktop 数据盘") : d.distroName;
+        // 状态含"虚拟磁盘"以命中 SeverityForFinding 的 Notice 关键词:vhdx 改报实占(allocated)后,
+        // 稀疏盘可能跌破 10GB 升 Notice 的字节阈值,此处靠关键词保持与通用 vhdx 一致的提示级可见性。
+        const QString state = d.isDockerData ? QStringLiteral("Docker 虚拟磁盘") : QStringLiteral("WSL 虚拟磁盘");
+        const QString reclaimHint = d.isDockerData
+            ? QStringLiteral("Docker 的镜像 / 容器 / 卷 / 构建缓存存储于该 WSL2 虚拟磁盘内。"
+                             "可用 docker system df 查看可回收明细,按需 docker system prune;压缩磁盘需先 wsl --shutdown。")
+            : QStringLiteral("WSL2 发行版 %1 的根文件系统虚拟磁盘。其内部空闲空间可在 wsl --terminate %1 "
+                             "(或 wsl --shutdown)后用 Optimize-VHD / diskpart 的 compact vdisk 压缩回收。").arg(d.distroName);
+        const QString detail = reclaimHint + QStringLiteral(" 实占 %1。实际可回收量取决于虚拟盘内部空闲度,"
+                                                            "此处为当前占用而非可回收保证。").arg(FormatAllocatedText(ab));
+        AddFinding(out, FeatureModule::DockerWsl, title, state, detail,
+                   QDir::toNativeSeparators(d.vhdxPath), ab.allocated);
+    }
+
+    // ② 兜底:未在 Lxss 登记的 Docker 目录 vhdx(旧版 / 异常布局),与 ① 去重。
+    const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+    if (!localAppData.isEmpty()) {
+        const QString dockerDir = localAppData + QStringLiteral("/Docker");
+        if (QFileInfo::exists(dockerDir) && !IsCancelled(cancelFlag)) {
+            QDirIterator iterator(dockerDir, QStringList{QStringLiteral("*.vhdx")},
+                                  QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+            while (iterator.hasNext() && !IsCancelled(cancelFlag)) {
+                iterator.next();
+                const QFileInfo info = iterator.fileInfo();
+                const QString key = NormalizeDiskPathKey(info.absoluteFilePath());
+                if (seenVhdx.contains(key)) {
+                    continue;  // 已由 Lxss 枚举归属,跳过避免重复计费。
+                }
+                seenVhdx << key;
+                const AllocatedBytes ab = AllocatedBytesOnDisk(info.absoluteFilePath());
+                AddFinding(out, FeatureModule::DockerWsl, info.fileName(), QStringLiteral("Docker 虚拟磁盘"),
+                           QStringLiteral("Docker 相关虚拟磁盘,未在 WSL 注册表中登记(可能为旧版布局)。"
+                                          "可用 docker system df 查看明细;压缩磁盘需先 wsl --shutdown。实占 %1。")
+                               .arg(FormatAllocatedText(ab)),
+                           QDir::toNativeSeparators(info.absoluteFilePath()), ab.allocated);
+            }
         }
     }
-    if (QStandardPaths::findExecutable(QStringLiteral("docker.exe")).isEmpty()) {
+
+    // ③ Docker Engine(Windows 服务,非 Desktop)镜像层:daemon.json 的 data-root 覆盖时用之,否则默认
+    //    %ProgramData%\docker。仅本地只读 JSON / 目录体积核算,不启动 dockerd。
+    const QString programData = qEnvironmentVariable("ProgramData");
+    if (!programData.isEmpty()) {
+        const QString dockerRoot = programData + QStringLiteral("/docker");
+        QString dataRoot = dockerRoot;
+        QFile daemonConfig(dockerRoot + QStringLiteral("/config/daemon.json"));
+        if (daemonConfig.open(QIODevice::ReadOnly)) {
+            QByteArray raw = daemonConfig.readAll();
+            // QJsonDocument::fromJson 不跳过 UTF-8 BOM(EF BB BF),带 BOM 的 daemon.json(手编 / 记事本
+            // 另存)会被解析成空文档,从而漏读自定义 data-root。剥离首部 BOM 后再解析。
+            if (raw.startsWith("\xEF\xBB\xBF")) {
+                raw.remove(0, 3);
+            }
+            const QJsonDocument doc = QJsonDocument::fromJson(raw);
+            const QJsonValue dataRootValue = doc.object().value(QStringLiteral("data-root"));
+            if (dataRootValue.isString()) {
+                const QString custom = dataRootValue.toString().trimmed();
+                if (!custom.isEmpty()) {
+                    dataRoot = custom;
+                }
+            }
+        }
+        if (QFileInfo::exists(dataRoot) && !IsCancelled(cancelFlag)) {
+            const QString windowsFilter = dataRoot + QStringLiteral("/windowsfilter");
+            const QString sizeTarget = QFileInfo::exists(windowsFilter) ? windowsFilter : dataRoot;
+            const PathSizeSummary summary = ComputePathSizeLimited(sizeTarget, 200000, cancelFlag);
+            if (summary.bytes > 0 || summary.files > 0) {
+                const QString truncNote = summary.truncated ? QStringLiteral("(部分枚举,实占为下限)") : QString();
+                AddFinding(out, FeatureModule::DockerWsl,
+                           QStringLiteral("Docker Engine 数据"), QStringLiteral("Docker Engine 数据"),
+                           QStringLiteral("Docker Engine(Windows 服务)的镜像 / 容器层位于 %1,实占 %2%3。"
+                                          "可用 docker system df / docker system prune 管理。")
+                               .arg(QDir::toNativeSeparators(sizeTarget), FormatBytesText(summary.bytes), truncNote),
+                           QDir::toNativeSeparators(sizeTarget), summary.bytes);
+            }
+        }
+    }
+
+    // ④ docker.exe 探测:如实告知可用 docker system df 自查,不自动执行子进程(避免控制台窗口与守护进程依赖)。
+    const QString dockerExe = QStandardPaths::findExecutable(QStringLiteral("docker.exe"));
+    if (dockerExe.isEmpty()) {
         AddFinding(out, FeatureModule::DockerWsl, QStringLiteral("Docker CLI"), QStringLiteral("未检测到"),
-                   QStringLiteral("未在 PATH 中找到 docker.exe，Docker 统计仅基于磁盘文件发现。"));
+                   QStringLiteral("未在 PATH 中找到 docker.exe。若已安装 Docker,WSL 发行版与数据盘仍按磁盘文件枚举。"));
     } else {
         AddFinding(out, FeatureModule::DockerWsl, QStringLiteral("Docker CLI"), QStringLiteral("可用"),
-                   QStringLiteral("检测到 docker.exe，可在后续版本接入 image / volume / build cache 细分统计。"));
+                   QStringLiteral("检测到 %1。可用 docker system df 查看镜像 / 容器 / 卷 / 构建缓存的可回收明细。"
+                                  "本工具不自动执行该命令,以免弹出控制台窗口并依赖守护进程在线。").arg(dockerExe));
     }
 }
 
@@ -2169,6 +2340,27 @@ QVector<FeatureFinding> BuildFindings(const QVector<FeatureModule>& modules, con
         }
         return left.title < right.title;
     });
+
+    // 跨模块 vhdx 归属去重:`wsl --import` 导入的发行版常把 ext4.vhdx 放在 Documents 等位置,会被
+    // DockerWsl(Lxss 注册表权威归属 + 实占体积)与 VirtualMachineImages(Documents 通用 *.vhdx 扫描 +
+    // 逻辑体积)同时报告,造成同一文件双计、归属冲突与体积口径不一。以 DockerWsl 的归属为准,移除
+    // VirtualMachineImages 中指向同一 vhdx 的重复项(DockerWsl 信息更准确:命名发行版 + 实占 + 压缩建议)。
+    {
+        QSet<QString> dockerWslVhdx;
+        for (const FeatureFinding& f : out) {
+            if (f.module == FeatureModule::DockerWsl && !f.path.isEmpty()) {
+                dockerWslVhdx << NormalizeDiskPathKey(f.path);
+            }
+        }
+        if (!dockerWslVhdx.isEmpty()) {
+            out.erase(std::remove_if(out.begin(), out.end(),
+                          [&dockerWslVhdx](const FeatureFinding& f) {
+                              return f.module == FeatureModule::VirtualMachineImages && !f.path.isEmpty() &&
+                                     dockerWslVhdx.contains(NormalizeDiskPathKey(f.path));
+                          }),
+                      out.end());
+        }
+    }
     return out;
 }
 
@@ -3462,7 +3654,7 @@ QString FeatureHubWidget::BuildActionPlanText(const FeatureFinding& finding) con
         lines << QStringLiteral("1. 先查看 Docker 空间分布：docker system df");
         lines << QStringLiteral("2. 确认无重要容器 / 镜像后再考虑：docker system prune");
         lines << QStringLiteral("3. WSL 虚拟盘压缩前先执行：wsl --shutdown");
-        lines << QStringLiteral("4. 对 ext4.vhdx 可使用 Optimize-VHD，但需要 Hyper-V PowerShell 模块。");
+        lines << QStringLiteral("4. 对 ext4.vhdx 可用 Optimize-VHD(需 Hyper-V PowerShell 模块)或系统自带的 diskpart compact vdisk 压缩。");
         break;
     case FeatureModule::MediaOrganizer:
         lines << QStringLiteral("1. 按年份和媒体类型建立目录，例如 Photos\\2026、Videos\\2026。");
