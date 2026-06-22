@@ -63,6 +63,7 @@ if (BUILD_QT_UI)
     add_executable(DiskLens WIN32
         src/qt/main.cpp
         src/qt/AppIcons.cpp
+        src/qt/FeatureHubWidget.cpp
         src/qt/MainWindow.cpp
         src/qt/TableExport.cpp
         src/qt/HeadlessCli.cpp
@@ -94,6 +95,7 @@ if (BUILD_QT_UI)
         Qt6::Widgets
         Shlwapi
         dwmapi
+        Rstrtmgr
     )
     set_target_properties(DiskLens PROPERTIES
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"

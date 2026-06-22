@@ -2275,6 +2275,11 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         periodicRescanTimer_->stop();
     }
     CancelDiskHealth();  // 置 healthQueryCancel_(信息性,配合 quitting_ 守卫;QueryAll 内部不可取消,靠回投前守卫兜底)。
+    if (featureHubPage_ != nullptr) {
+        // 工具箱体检(std::thread)同样需在真实退出路径同步收尾:置 quitting_ + cancel + join,
+        // 镜像下方 health worker 处理,杜绝"扫描中关窗→回投悬垂 this"UAF。
+        featureHubPage_->RequestShutdownForQuit();
+    }
     if (healthWorkerThread_ != nullptr) {
         healthWorkerThread_->quit();   // 投递退出事件到 worker 事件循环(若正卡在 QueryAll,完成后才处理)。
         if (healthWorkerThread_->wait(5000)) {
@@ -4033,11 +4038,13 @@ QWidget* MainWindow::CreateModuleSidebar() {
     searchModuleButton_ = createModuleButton(QStringLiteral("文件搜索"), QStringLiteral("全系统快速搜索文件名、扩展名和路径片段"));
     cleanupModuleButton_ = createModuleButton(QStringLiteral("垃圾清理"), QStringLiteral("扫描可清理项目并按安全等级处理"));
     healthModuleButton_ = createModuleButton(QStringLiteral("磁盘健康"), QStringLiteral("读取物理盘 SMART / NVMe 健康日志,查看温度、通电时长和健康评估"));
+    featureHubModuleButton_ = createModuleButton(QStringLiteral("空间工具箱"), QStringLiteral("新增空间治理能力：增长溯源、软件体积、应用搬家、隐私雷达、Docker / WSL 等"));
 
     layout->addWidget(diskModuleButton_);
     layout->addWidget(searchModuleButton_);
     layout->addWidget(cleanupModuleButton_);
     layout->addWidget(healthModuleButton_);
+    layout->addWidget(featureHubModuleButton_);
     layout->addStretch(1);
 
     // 页脚分割线与品牌版本信息。
@@ -4079,6 +4086,12 @@ QWidget* MainWindow::CreateModuleSidebar() {
         }
         if (!healthQuerying_ && healthInfos_.empty()) {
             RefreshDiskHealth();
+        }
+        UpdateModuleChrome();
+    });
+    connect(featureHubModuleButton_, &QPushButton::clicked, this, [this]() {
+        if (tabs_ != nullptr && featureHubPage_ != nullptr) {
+            tabs_->setCurrentWidget(featureHubPage_);
         }
         UpdateModuleChrome();
     });
@@ -4266,13 +4279,16 @@ QWidget* MainWindow::CreateWorkspace() {
     tabs_->addTab(CreateSearchTab(), QStringLiteral("快速搜索"));
     tabs_->addTab(CreateCleanupTab(), QStringLiteral("垃圾清理"));
     tabs_->addTab(CreateHealthTab(), QStringLiteral("磁盘健康"));
-    // 文件年龄直方图页(追加在末尾=index 8,不改动既有 0..7 的索引与隐藏 tab,回归面最小)。
+    featureHubPage_ = new FeatureHubWidget(tabs_);
+    tabs_->addTab(featureHubPage_, QStringLiteral("空间工具箱"));
+    // 文件年龄直方图页(追加在末尾,index 位于所有隐藏模块之后,不改动既有磁盘分析页的可见顺序)。
     // 控件本身就是页(沿用 largeFilesView_/staleFilesView_ 的"控件即页"做法),故页签判定直接用它。
     ageHistogramWidget_ = new FileAgeHistogramWidget(tabs_);
     tabs_->addTab(ageHistogramWidget_, QStringLiteral("文件年龄"));
     tabs_->tabBar()->setTabVisible(5, false);
     tabs_->tabBar()->setTabVisible(6, false);
     tabs_->tabBar()->setTabVisible(7, false);
+    tabs_->tabBar()->setTabVisible(8, false);
 
     rightLayout->addWidget(metrics);
     rightLayout->addWidget(tabs_, 1);
@@ -4888,10 +4904,14 @@ void MainWindow::UpdateModuleChrome() {
     if (healthModuleButton_ != nullptr) {
         healthModuleButton_->setChecked(currentPage != nullptr && healthPage_ != nullptr && currentPage == healthPage_);
     }
+    if (featureHubModuleButton_ != nullptr) {
+        featureHubModuleButton_->setChecked(currentPage != nullptr && featureHubPage_ != nullptr && currentPage == featureHubPage_);
+    }
     if (infoBarStack_ != nullptr) {
         const bool isSearchPage = currentPage != nullptr && searchView_ != nullptr && currentPage->isAncestorOf(searchView_);
         const bool isCleanupPage = currentPage != nullptr && cleanupTree_ != nullptr && currentPage->isAncestorOf(cleanupTree_);
         const bool isHealthPage = currentPage != nullptr && healthPage_ != nullptr && currentPage == healthPage_;
+        const bool isFeatureHubPage = currentPage != nullptr && featureHubPage_ != nullptr && currentPage == featureHubPage_;
         if (isDiskAnalysisPage) {
             infoBarStack_->setCurrentIndex(0);
         } else if (isSearchPage) {
@@ -4901,6 +4921,8 @@ void MainWindow::UpdateModuleChrome() {
             infoBarStack_->setCurrentIndex(2);
         } else if (isHealthPage) {
             infoBarStack_->setCurrentIndex(3);
+        } else if (isFeatureHubPage) {
+            infoBarStack_->setCurrentIndex(0);
         } else {
             infoBarStack_->setCurrentIndex(0);
         }
@@ -6047,6 +6069,10 @@ void MainWindow::UpdateModuleNavIcons() {
     if (healthModuleButton_ != nullptr) {
         healthModuleButton_->setIcon(buildNavIcon(
             [px](const QColor& c) { return app_icons::refresh(px, c); }, muted, accent));
+    }
+    if (featureHubModuleButton_ != nullptr) {
+        featureHubModuleButton_->setIcon(buildNavIcon(
+            [px](const QColor& c) { return app_icons::folderOpen(px, c); }, muted, accent));
     }
 }
 

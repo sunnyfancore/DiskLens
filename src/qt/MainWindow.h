@@ -6,6 +6,7 @@
 #include "core/NtfsMftScanner.h"
 #include "core/ScanModels.h"
 #include "core/ScanDiff.h"
+#include "qt/FeatureHubWidget.h"
 #include "qt/ResultTableModel.h"
 #include "qt/TreemapWidget.h"
 #include "qt/CategoryDonutWidget.h"
@@ -1039,6 +1040,16 @@ private:
      * @brief 主功能导航中的磁盘健康按钮。
      */
     QPushButton* healthModuleButton_ = nullptr;
+
+    /**
+     * @brief 主功能导航中的空间工具箱按钮。
+     */
+    QPushButton* featureHubModuleButton_ = nullptr;
+
+    /**
+     * @brief 空间工具箱页面。
+     */
+    FeatureHubWidget* featureHubPage_ = nullptr;
 
     /**
      * @brief 主工作区分割栏。
