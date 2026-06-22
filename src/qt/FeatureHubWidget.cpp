@@ -1447,9 +1447,16 @@ void ScanQuotaBudget(QVector<FeatureFinding>& out, const QString& sourcePath, st
         }
         const PathSizeSummary summary = ComputePathSizeLimited(budget.path, 20000, cancelFlag);
         const bool over = summary.bytes > budget.budgetBytes;
+        // 说明里明确这是"建议预算(参考值)"而非系统实测配额——NTFS 真实配额查询留给后续批次;当前硬
+        // 编码预算不可被读成"系统认定的配额"。截断时 bytes 是下限估算,需告知用户实际可能更高。
+        QString detail = QStringLiteral("建议预算 %1（参考值，非系统实测配额），当前约 %2。")
+                             .arg(FormatBytesText(budget.budgetBytes), FormatBytesText(summary.bytes));
+        if (summary.truncated) {
+            detail += QStringLiteral("目录条目较多，已按扫描上限估算，实际占用可能更高。");
+        }
         AddFinding(out, FeatureModule::QuotaBudget, QFileInfo(budget.path).fileName().isEmpty() ? budget.path : QFileInfo(budget.path).fileName(),
                    over ? QStringLiteral("超预算") : QStringLiteral("预算内"),
-                   QStringLiteral("默认预算 %1，当前约 %2。").arg(FormatBytesText(budget.budgetBytes), FormatBytesText(summary.bytes)),
+                   detail,
                    budget.path, summary.bytes);
     }
 }
@@ -1468,17 +1475,30 @@ void ScanBackupGap(QVector<FeatureFinding>& out, const QString& sourcePath, cons
     }
     important.removeDuplicates();
     const bool hasTarget = PathExists(targetPath);
+    if (!hasTarget) {
+        // 无目标盘时不可判定备份缺口:原行为会把每个重要目录都打成"备份缺口"(SeverityForFinding 命中
+        // Critical"备份缺口"),整列假性高严重度。改为单条中性"等待输入"提示,引导用户先选备份目标盘,
+        // 既有"有目标时逐目录核对"逻辑不变。
+        AddFinding(out, FeatureModule::BackupGap, QStringLiteral("请选择备份目标"), QStringLiteral("等待输入"),
+                   QStringLiteral("未设置备份目标盘，无法核对备份缺口。请在目标路径选择一个备份盘或目录后重新体检。"));
+        return;
+    }
     for (const QString& path : ExistingPaths(important)) {
         if (IsCancelled(cancelFlag)) {
             break;
         }
         const PathSizeSummary summary = ComputePathSizeLimited(path, 15000, cancelFlag);
-        const QString expectedBackup = hasTarget ? QDir(targetPath).filePath(QFileInfo(path).fileName()) : QString();
-        const bool backed = hasTarget && QFileInfo::exists(expectedBackup);
+        const QString expectedBackup = QDir(targetPath).filePath(QFileInfo(path).fileName());
+        const bool backed = QFileInfo::exists(expectedBackup);
+        QString detail = backed
+            ? QStringLiteral("目标路径下存在同名备份目录，仍建议比对修改时间。")
+            : QStringLiteral("未在目标路径发现同名备份目录；磁盘健康异常时应优先处理。");
+        if (summary.truncated) {
+            detail += QStringLiteral("目录条目较多，已按扫描上限估算，实际占用可能更高。");
+        }
         AddFinding(out, FeatureModule::BackupGap, QFileInfo(path).fileName().isEmpty() ? path : QFileInfo(path).fileName(),
                    backed ? QStringLiteral("发现备份目录") : QStringLiteral("备份缺口"),
-                   backed ? QStringLiteral("目标路径下存在同名备份目录，仍建议比对修改时间。")
-                          : QStringLiteral("未在目标路径发现同名备份目录；磁盘健康异常时应优先处理。"),
+                   detail,
                    path, summary.bytes);
     }
 }
@@ -1582,15 +1602,29 @@ void ScanTransferAssistant(QVector<FeatureFinding>& out, const QString& sourcePa
                    QStringLiteral("请选择要迁移的大文件或目录。"));
         return;
     }
+    if (!PathExists(targetPath)) {
+        // 无目标盘时不再静默回退到 QDir::rootPath()(C:):原行为会把系统盘当成迁移目标,误报其可用空间
+        // 充足。改为中性"等待输入"提示,引导用户先选目标盘。
+        AddFinding(out, FeatureModule::TransferAssistant, QStringLiteral("目标路径不可用"), QStringLiteral("等待输入"),
+                   QStringLiteral("未设置迁移目标盘，无法核对目标空间。请在目标路径选择一个空间充足的盘或目录后重新体检。"));
+        return;
+    }
     const PathSizeSummary summary = ComputePathSizeLimited(sourcePath, 50000, cancelFlag);
-    QStorageInfo targetStorage(PathExists(targetPath) ? targetPath : QDir::rootPath());
+    QStorageInfo targetStorage(targetPath);
     const std::uint64_t freeBytes = targetStorage.isValid() ? static_cast<std::uint64_t>(std::max<qint64>(0, targetStorage.bytesAvailable())) : 0;
-    const bool enough = freeBytes > summary.bytes;
+    // 截断时 summary.bytes 是下限估算:既不能据此时断言"目标空间充足"(假阴性),也不宜直接判"不足"
+    // (假阳性,Critical)。改用中性"体积待复核"状态并提示人工核对,避免任一方向的错误结论。
+    QString state;
+    QString detail = QStringLiteral("待迁移约 %1，目标可用约 %2。建议迁移前启用校验并保留源文件到确认完成。")
+                         .arg(FormatBytesText(summary.bytes), FormatBytesText(freeBytes));
+    if (summary.truncated) {
+        state = QStringLiteral("体积待复核");
+        detail += QStringLiteral("源体积超过扫描上限，以下为部分估算，实际可能更大，请勿仅据此判断目标空间是否充足。");
+    } else {
+        state = freeBytes > summary.bytes ? QStringLiteral("目标空间充足") : QStringLiteral("目标空间不足");
+    }
     AddFinding(out, FeatureModule::TransferAssistant, QFileInfo(sourcePath).fileName().isEmpty() ? sourcePath : QFileInfo(sourcePath).fileName(),
-               enough ? QStringLiteral("目标空间充足") : QStringLiteral("目标空间不足"),
-               QStringLiteral("待迁移约 %1，目标可用约 %2。建议迁移前启用校验并保留源文件到确认完成。")
-                   .arg(FormatBytesText(summary.bytes), FormatBytesText(freeBytes)),
-               sourcePath, summary.bytes);
+               state, detail, sourcePath, summary.bytes);
 }
 
 /**
@@ -1821,7 +1855,9 @@ QWidget* FeatureHubWidget::CreateToolbar() {
 
     sourcePathEdit_ = new QLineEdit(toolbar);
     sourcePathEdit_->setPlaceholderText(QStringLiteral("源路径：用于增长、归档、隐私、开发空间、传输等模块"));
-    sourcePathEdit_->setText(StandardPathOrHome(QStandardPaths::DownloadLocation));
+    // 源路径默认留空(仅以占位符引导):原默认 Downloads 会误导传输/备份/配额/媒体等模块把"下载"当
+    // 成操作对象。留空时各模块回退到自身恰当的标准路径(照片→图片、下载整理→下载等)或显示"等待
+    // 输入",不再产生与默认值绑定的错误输出。LoadSettings 仍会恢复用户上次显式选择的路径。
 
     auto* sourceButton = new QPushButton(QStringLiteral("源路径"), toolbar);
     sourceButton->setToolTip(QStringLiteral("选择源文件或目录"));
@@ -3060,8 +3096,8 @@ QString FeatureHubWidget::BuildActionPlanText(const FeatureFinding& finding) con
         lines << QStringLiteral("3. 大视频建议先转移到归档盘，再用备份缺口检查确认有副本。");
         break;
     case FeatureModule::QuotaBudget:
-        lines << QStringLiteral("1. 当前结果给出默认预算与当前占用。");
-        lines << QStringLiteral("2. 超预算目录建议拆成“保留 / 归档 / 可删除缓存”三类。");
+        lines << QStringLiteral("1. 这里的“预算”是参考建议值，并非系统实测配额（NTFS 真实配额需另行查询）。");
+        lines << QStringLiteral("2. 若目录明显超出建议预算，可按“保留 / 归档 / 可删除缓存”三类取舍，不必视为硬性限额。");
         lines << QStringLiteral("3. 后续可把该目录加入周期重扫，超阈值时提示。");
         break;
     case FeatureModule::BackupGap:
