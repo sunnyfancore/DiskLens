@@ -2001,6 +2001,7 @@ void ScanMessengerCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomi
     const QString documents = StandardPathOrHome(QStandardPaths::DocumentsLocation);
     QVector<CacheCandidate> candidates{
         {QStringLiteral("微信文件"), documents + QStringLiteral("/WeChat Files"), true},
+        {QStringLiteral("微信文件（4.x）"), documents + QStringLiteral("/xwechat_files"), true},
         {QStringLiteral("企业微信文件"), documents + QStringLiteral("/WXWork"), true},
         {QStringLiteral("QQ 文件"), documents + QStringLiteral("/Tencent Files"), true},
         {QStringLiteral("微信配置缓存"), roamingAppData + QStringLiteral("/Tencent/WeChat"), false},
