@@ -2059,6 +2059,12 @@ void ScanMailArchive(QVector<FeatureFinding>& out, const QString& sourcePath, st
     roots << StandardPathOrHome(QStandardPaths::DocumentsLocation);
     roots << localAppData + QStringLiteral("/Microsoft/Outlook");
     roots << roamingAppData + QStringLiteral("/Microsoft/Outlook");
+    // 新版 Outlook(OneOutlook / Monarch,Win11 新机默认邮件客户端)的离线缓存 OST 改用新目录,
+    // 不再落到经典 Outlook 的 .../Microsoft/Outlook;不补扫则新版 Outlook 用户的 OST 不被发现
+    // (与"邮件归档库检查"名实不符)。补桌面版与 MSIX 包缓存两处候选;PathExists 过滤不存在的目录,
+    // 未装新版 Outlook 的机器无影响(候选路径不准也只是空扫描,不产生误报——*.ost 仅匹配真实文件)。
+    roots << localAppData + QStringLiteral("/Microsoft/OutlookForWindows");
+    roots << localAppData + QStringLiteral("/Packages/Microsoft.OutlookForWindows_8wekyb3d8bbwe/LocalCache");
     if (PathExists(sourcePath)) {
         roots << sourcePath;
     }
