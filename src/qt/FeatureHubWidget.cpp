@@ -21,6 +21,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFrame>
+#include <QHash>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -1364,6 +1365,177 @@ void ScanPrivacyRadar(QVector<FeatureFinding>& out, const QString& sourcePath, s
                        QStringLiteral("建议确认存放位置是否安全（避免随同步盘、备份或公开项目外泄）。"),
                        info.absoluteFilePath(), static_cast<std::uint64_t>(std::max<qint64>(0, info.size())));
             ++emitted;
+        }
+    }
+
+    // 浏览器凭据/密码库:Chromium 与 Firefox 的 profile 目录含巨大缓存子树(GPU Cache/Code Cache/Service Worker),
+    // 上面递归 walk(emitted<120/visited<120000 per root)会先撞进缓存耗尽预算却到不了 profile 内的凭据文件
+    // (Login Data/Network/Cookies 等)——故不把浏览器 User Data 加进递归根,改用外科式定点探测:枚举 profile
+    // 子目录 + 直接按已知文件名 QFileInfo::exists 查。凭据文件虽小(几 KB~MB),但含保存的密码/加密密钥/会话 Cookie。
+    // 严重度两级(免多浏览器机 ~20+ 凭据全 Critical 致 GovernanceScore 恒钳 0 失区分力):主密钥/密钥材料(Chromium
+    // Local State、Firefox key4.db/key3.db)无之则加密库不可解、最敏感→Critical("敏感文件"含"敏感"→Critical);
+    // 加密凭据库(Login Data/Cookies/logins.json 等,加密、缺主密钥即废数据)→Warning("凭据风险"含"风险"不含"敏感")。
+    // 与上面 walk 的扫描根(桌面/文档/~.ssh 等,ImportantUserFolders 不含 LOCALAPPDATA/APPDATA)不相交,不产生同文件
+    // 双发;但该不相交"依赖"上面 LooksSensitiveFile 对凭据文件名(Login Data/key4.db 等)视而不见——日后若拓宽
+    // LooksSensitiveFile 认这些名,须同步从递归 walk 排除浏览器目录,否则同文件经两路径双发(键同则 BuildFindings 去重兜底)。
+    {
+        static const QHash<QString, QString> credDescriptions{
+            // Chromium(每个 profile 内,或 User Data 根下的 Local State 主密钥)
+            {QStringLiteral("Login Data"), QStringLiteral("浏览器保存的登录密码（加密存储，配合本机主密钥可解密，外泄即等同密码泄露）")},
+            {QStringLiteral("Login Data For Account"), QStringLiteral("浏览器账户同步的登录密码（加密存储）")},
+            {QStringLiteral("Web Data"), QStringLiteral("浏览器自动填充数据（含表单与支付信息，加密存储）")},
+            {QStringLiteral("Cookies"), QStringLiteral("浏览器会话 Cookies（含登录态，可被复用冒充已登录）")},
+            {QStringLiteral("Network/Cookies"), QStringLiteral("浏览器网络服务会话 Cookies（新版 Chromium 迁移至此，含登录态）")},
+            {QStringLiteral("Local State"), QStringLiteral("浏览器主密钥文件（用于解密保存的密码/Cookies，严禁外泄或上传）")},
+            // Firefox(每个 profile 内)
+            {QStringLiteral("logins.json"), QStringLiteral("Firefox 保存的登录信息（加密，配合 key4.db 主密钥可解密）")},
+            {QStringLiteral("key4.db"), QStringLiteral("Firefox 主密钥库（用于解密保存的密码，严禁外泄）")},
+            {QStringLiteral("key3.db"), QStringLiteral("Firefox 旧版主密钥库（用于解密历史密码）")},
+            {QStringLiteral("signons.sqlite"), QStringLiteral("Firefox 旧版密码库（已弃用，仍可能含历史密码）")},
+            {QStringLiteral("cert9.db"), QStringLiteral("Firefox 证书库（含客户端证书与 CA 信任）")},
+        };
+        // 主密钥/密钥材料:Critical("敏感文件");其余加密凭据库 Warning。Warning 级状态须含"风险"且不含"敏感"
+        //(否则 SeverityForFinding 先命中"敏感"判 Critical)——故用"凭据风险"。
+        static const QSet<QString> masterKeyCreds{
+            QStringLiteral("Local State"), QStringLiteral("key4.db"), QStringLiteral("key3.db"),
+        };
+        const QString localAppData = qEnvironmentVariable("LOCALAPPDATA");
+        const QString roamingAppData = qEnvironmentVariable("APPDATA");
+        const QString safeTail = QStringLiteral("。建议确认存放位置是否安全（避免随同步盘、备份或公开项目外泄）。");
+
+        // 发射单个凭据文件 finding;文件不存在/非文件/已取消时返回 false 不计数。标题取文件名(Network/Cookies→末段
+        // "Cookies");状态按是否主密钥分 Critical("敏感文件")/Warning("凭据风险");明细由文件名查 credDescriptions + 通用安全建议尾。
+        auto emitCred = [&](const QString& dir, const QString& rel) -> bool {
+            if (IsCancelled(cancelFlag)) {
+                return false;
+            }
+            const QFileInfo fi(dir + QStringLiteral("/") + rel);
+            if (!fi.exists() || !fi.isFile()) {
+                return false;
+            }
+            const auto it = credDescriptions.constFind(rel);
+            const QString detail = (it != credDescriptions.constEnd() ? it.value() : QStringLiteral("浏览器/客户端本地凭据文件（含敏感数据）")) + safeTail;
+            const QString state = masterKeyCreds.contains(rel) ? QStringLiteral("敏感文件") : QStringLiteral("凭据风险");
+            AddFinding(out, FeatureModule::PrivacyRadar, fi.fileName(), state, detail,
+                       fi.absoluteFilePath(), static_cast<std::uint64_t>(std::max<qint64>(0, fi.size())));
+            return true;
+        };
+
+        int emittedCreds = 0;
+        // Chromium 系标准布局(User Data 根下 Local State 主密钥 + Default/Profile N 等子 profile):Chrome/Edge/Brave/Vivaldi/Yandex。
+        const QStringList chromiumRoots{
+            localAppData + QStringLiteral("/Google/Chrome/User Data"),
+            localAppData + QStringLiteral("/Microsoft/Edge/User Data"),
+            localAppData + QStringLiteral("/BraveSoftware/Brave-Browser/User Data"),
+            localAppData + QStringLiteral("/Vivaldi/User Data"),
+            localAppData + QStringLiteral("/Yandex/YandexBrowser/User Data"),
+        };
+        const QStringList chromiumRootCreds{ QStringLiteral("Local State") };
+        const QStringList chromiumProfileCreds{
+            QStringLiteral("Login Data"), QStringLiteral("Login Data For Account"),
+            QStringLiteral("Web Data"), QStringLiteral("Cookies"), QStringLiteral("Network/Cookies"),
+        };
+        for (const QString& root : chromiumRoots) {
+            if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                break;
+            }
+            if (!PathExists(root)) {
+                continue;
+            }
+            for (const QString& rel : chromiumRootCreds) {
+                if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                    break;
+                }
+                if (emitCred(root, rel)) {
+                    ++emittedCreds;
+                }
+            }
+            // 仅扫已知 profile 名(避免遍历 GrShaderCache/Snapshots/Crashpad 等非 profile 子目录);"."/".."/其它
+            // 目录名一律被 isProfile 拒绝,即便 entryList 返回也无害。
+            const QStringList profiles = QDir(root).entryList(QDir::Dirs | QDir::Hidden, QDir::Name);
+            for (const QString& profile : profiles) {
+                if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                    break;
+                }
+                const bool isProfile = (profile == QStringLiteral("Default"))
+                    || profile.startsWith(QStringLiteral("Profile "))
+                    || profile == QStringLiteral("Guest Profile")
+                    || profile == QStringLiteral("System Profile");
+                if (!isProfile) {
+                    continue;
+                }
+                const QString profilePath = root + QStringLiteral("/") + profile;
+                for (const QString& rel : chromiumProfileCreds) {
+                    if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                        break;
+                    }
+                    if (emitCred(profilePath, rel)) {
+                        ++emittedCreds;
+                    }
+                }
+            }
+        }
+
+        // Opera / Opera GX(Chromium 内核但布局不同):无 User Data 父级,profile 目录即 ".../Opera Stable" /
+        // ".../Opera GX Stable",Local State 与 Login Data/Cookies 等凭据文件**直接**在其内(无 per-profile 枚举)。
+        const QStringList operaProfileCreds{
+            QStringLiteral("Local State"), QStringLiteral("Login Data"), QStringLiteral("Login Data For Account"),
+            QStringLiteral("Web Data"), QStringLiteral("Cookies"), QStringLiteral("Network/Cookies"),
+        };
+        const QStringList operaRoots{
+            roamingAppData + QStringLiteral("/Opera Software/Opera Stable"),
+            roamingAppData + QStringLiteral("/Opera Software/Opera GX Stable"),
+        };
+        for (const QString& root : operaRoots) {
+            if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                break;
+            }
+            if (!PathExists(root)) {
+                continue;
+            }
+            for (const QString& rel : operaProfileCreds) {
+                if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                    break;
+                }
+                if (emitCred(root, rel)) {
+                    ++emittedCreds;
+                }
+            }
+        }
+
+        // Firefox:Profiles 根下每个随机名目录即一个 profile,直接 glob(无需解析 profiles.ini)。Release 与 Developer
+        // Edition / Nightly 各用独立 Profiles 目录(Firefox 67+ 多频道隔离),Beta 共用 Release 的(已覆盖)。
+        const QStringList firefoxRoots{
+            roamingAppData + QStringLiteral("/Mozilla/Firefox/Profiles"),
+            roamingAppData + QStringLiteral("/Mozilla/Firefox/Developer Edition/Profiles"),
+            roamingAppData + QStringLiteral("/Mozilla/Firefox/Nightly/Profiles"),
+        };
+        const QStringList firefoxProfileCreds{
+            QStringLiteral("logins.json"), QStringLiteral("key4.db"), QStringLiteral("key3.db"),
+            QStringLiteral("signons.sqlite"), QStringLiteral("cert9.db"),
+        };
+        for (const QString& firefoxRoot : firefoxRoots) {
+            if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                break;
+            }
+            if (!PathExists(firefoxRoot)) {
+                continue;
+            }
+            const QStringList ffProfiles = QDir(firefoxRoot).entryList(QDir::Dirs, QDir::Name);
+            for (const QString& profile : ffProfiles) {
+                if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                    break;
+                }
+                const QString profilePath = firefoxRoot + QStringLiteral("/") + profile;
+                for (const QString& rel : firefoxProfileCreds) {
+                    if (emittedCreds >= 120 || IsCancelled(cancelFlag)) {
+                        break;
+                    }
+                    if (emitCred(profilePath, rel)) {
+                        ++emittedCreds;
+                    }
+                }
+            }
         }
     }
 }
