@@ -35,6 +35,7 @@
 #include <QMetaObject>
 #include <QPoint>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSet>
 #include <QSettings>
 #include <QSplitter>
@@ -70,6 +71,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace disk_lens::qt_ui {
 namespace {
@@ -203,7 +205,7 @@ QVector<ModuleInfo> AllModules() {
         {FeatureModule::FileUnlocker, QStringLiteral("文件占用识别器"), QStringLiteral("用 Windows Restart Manager 识别占用进程（仅识别不自动解锁）")},
         {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
         {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"), QStringLiteral("识别同步盘本地占用、冲突文件和大缓存")},
-        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("核算 Windows.old、更新备份与恢复目录占用；卷影副本与还原点仅给出系统保护查看入口（不枚举）")},
+        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("核算 Windows.old、更新备份与恢复目录占用，并查询卷影副本存储（VSS/还原点）实际占用；可在系统保护入口调整。")},
         {FeatureModule::BrowserCache, QStringLiteral("浏览器缓存中心"), QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器缓存和离线数据")},
         {FeatureModule::StartupFootprint, QStringLiteral("启动项体积检查"), QStringLiteral("盘点开机启动入口及其关联程序占用")},
         {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"), QStringLiteral("识别微信、企业微信、QQ、Teams 等聊天客户端的本地数据与缓存")},
@@ -2986,7 +2988,312 @@ void ScanCloudSync(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_boo
 }
 
 /**
+ * @brief 一次 vssadmin list shadowstorage 查询的原始结果。
+ *
+ * vssadmin 按 Windows OEM 代码页(zh-CN=CP936/GBK、en-US=CP437)输出,高字节为本地化标签文字,
+ * 但 ASCII 字节(数字/单位/百分号/GUID/盘符括号)在所有 OEM 代码页中与 ASCII 逐字节一致,故解析只在
+ * ASCII 令牌上进行、与系统语言无关。raw 为未解码的原始字节;ran 表示进程正常结束(取得 exitCode,
+ * 非超时/取消/启动失败);timedOut 表示等待超时已被强制终止。
+ */
+struct VssQueryResult {
+    QByteArray raw;       // 原始 stdout(含 stderr 合并),均为 OEM 字节。
+    DWORD exitCode = 0;   // 进程退出码。
+    bool ran = false;     // 进程正常结束(拿到 exitCode,非超时)。
+    bool timedOut = false;
+};
+
+/**
+ * @brief 以 CREATE_NO_WINDOW(无控制台窗口闪烁)、可取消、5 秒超时运行 vssadmin list shadowstorage。
+ *
+ * 用 Win32 CreateProcess 而非 QProcess:GUI 进程启动控制台子进程默认会弹出控制台窗口,CREATE_NO_WINDOW
+ * 抑制之(DockerWsl 同样因此不自动跑 docker.exe)。stdout/stderr 合并到单条管道,输出小(<2KB)故
+ * "进程结束后一次读尽"无管道写满死锁风险。等待分片 100ms 轮询以便响应 cancelFlag;超时则
+ * TerminateProcess + 短等待回收,ran=false 让上层降级——绝不阻塞 worker 线程或卡死有界 join。
+ * 本进程已 requireAdministrator 清单提权,vssadmin 应有权限;若意外未提权返回 exitCode=2,上层降级提示。
+ */
+VssQueryResult QueryVssAdminShadowStorage(const std::shared_ptr<std::atomic_bool>& cancelFlag) {
+    VssQueryResult result;
+    QString sysRoot = QString::fromLocal8Bit(qgetenv("SystemRoot"));
+    if (sysRoot.isEmpty()) {
+        sysRoot = QStringLiteral("C:\\Windows");
+    }
+    const QString exe = sysRoot + QStringLiteral("\\System32\\vssadmin.exe");
+    if (!QFileInfo::exists(exe)) {
+        return result;  // 不存在 → ran=false,上层降级。
+    }
+    const QString cmdLine = QStringLiteral("\"%1\" list shadowstorage").arg(exe);
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    sa.lpSecurityDescriptor = nullptr;
+    HANDLE hRead = nullptr;
+    HANDLE hWrite = nullptr;
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+        return result;
+    }
+    SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);  // 读端不继承,避免本进程挂住读端。
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;  // 合并 stderr(错误信息无 ASCII 数值三元组 → 上层结构判定降级)。
+    PROCESS_INFORMATION pi{};
+
+    // CreateProcessW 可能改写命令行缓冲,放入可变缓冲。
+    const std::wstring wcmd = cmdLine.toStdWString();
+    std::vector<wchar_t> cmdBuf(wcmd.begin(), wcmd.end());
+    cmdBuf.push_back(L'\0');
+
+    const BOOL ok = CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, TRUE /*InheritHandles*/,
+                                   CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    CloseHandle(hWrite);  // 关闭本端写句柄,子进程退出后读端读到 EOF。
+    if (!ok) {
+        CloseHandle(hRead);
+        return result;
+    }
+
+    constexpr DWORD kStepMs = 100;
+    constexpr int kMaxSteps = 50;  // 100ms × 50 = 5 秒上限。
+    bool finished = false;
+    for (int i = 0; i < kMaxSteps; ++i) {
+        if (IsCancelled(cancelFlag)) {
+            break;
+        }
+        if (WaitForSingleObject(pi.hProcess, kStepMs) == WAIT_OBJECT_0) {
+            finished = true;
+            break;
+        }
+    }
+    if (!finished) {
+        result.timedOut = true;
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 500);
+    }
+    GetExitCodeProcess(pi.hProcess, &result.exitCode);
+
+    // 输出小,进程结束后一次读尽(无写满死锁风险)。
+    char chunk[8192];
+    DWORD readN = 0;
+    while (ReadFile(hRead, chunk, sizeof(chunk), &readN, nullptr) && readN > 0) {
+        result.raw.append(chunk, static_cast<int>(readN));
+    }
+
+    result.ran = finished;
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(hRead);
+    return result;
+}
+
+/**
+ * @brief 一卷的卷影副本存储关联(已通过交叉校验)。
+ */
+struct VssAssociation {
+    QString label;            // 盘符标签如 "C:",或 GUID 尾段(无盘符卷)。
+    qint64 usedBytes = 0;     // 已用卷影副本存储(实际占用),作 finding 的 bytes。
+    qint64 allocatedBytes = 0;
+    qint64 maximumBytes = -1; // -1 = UNBOUNDED 无上限。
+};
+
+/**
+ * @brief 把单位令牌换算为字节倍数;未知单位返回 -1。
+ */
+qint64 VssUnitMultiplier(const QString& unit) {
+    const QString u = unit.toCaseFolded();
+    if (u == QLatin1String("bytes") || u == QLatin1String("b")) {
+        return 1;
+    }
+    if (u == QLatin1String("kb")) {
+        return 1024LL;
+    }
+    if (u == QLatin1String("mb")) {
+        return 1024LL * 1024;
+    }
+    if (u == QLatin1String("gb")) {
+        return 1024LL * 1024 * 1024;
+    }
+    if (u == QLatin1String("tb")) {
+        return 1024LL * 1024 * 1024 * 1024;
+    }
+    if (u == QLatin1String("pb")) {
+        return 1024LL * 1024 * 1024 * 1024 * 1024;
+    }
+    return -1;
+}
+
+/**
+ * @brief 数值(GB 等)×字节倍数换算,四舍五入;溢出返回 -1。
+ */
+qint64 CheckedVssMul(double value, qint64 mult) {
+    if (mult < 0) {
+        return -1;
+    }
+    const double product = value * static_cast<double>(mult);
+    if (product < 0.0 || product > 9.0e18) {  // qint64 max ≈ 9.22e18。
+        return -1;
+    }
+    return static_cast<qint64>(product + 0.5);
+}
+
+/**
+ * @brief 从行表里取"已用"行上一行(存储卷行)的盘符/GUID 标签。
+ */
+QString ExtractStorageVolumeLabel(const QStringList& lines, int usedIdx) {
+    const int volIdx = usedIdx - 1;
+    if (volIdx < 0 || volIdx >= lines.size()) {
+        return QStringLiteral("(未知卷)");
+    }
+    const QString& volLine = lines[volIdx];
+    static const QRegularExpression driveRe(QStringLiteral("\\(([A-Za-z]:)\\)"));
+    const QRegularExpressionMatch dm = driveRe.match(volLine);
+    if (dm.hasMatch()) {
+        return dm.captured(1);  // "C:"
+    }
+    static const QRegularExpression guidRe(QStringLiteral("Volume\\{([0-9A-Fa-f]{8})"));
+    const QRegularExpressionMatch gm = guidRe.match(volLine);
+    if (gm.hasMatch()) {
+        return QStringLiteral("Volume{%1}").arg(gm.captured(1).toUpper());  // GUID 前 8 位。
+    }
+    return QStringLiteral("(未知卷)");
+}
+
+/**
+ * @brief 把盘符标签解析为 QStorageInfo 卷容量;不可解返回 -1(不因此丢弃 finding)。
+ */
+qint64 ResolveVolumeBytesTotal(const QString& label) {
+    if (label.size() < 2 || label[1] != QLatin1Char(':')) {
+        return -1;  // 仅 "X:" 盘符可稳定解析;GUID 标签不解析。
+    }
+    const QStorageInfo vol(label + QStringLiteral("\\"));
+    if (!vol.isValid()) {
+        return -1;
+    }
+    const qint64 total = vol.bytesTotal();
+    return total > 0 ? total : -1;
+}
+
+/**
+ * @brief VSS 解析结果:通过的关联 + 是否曾见到数值行(用于区分"未配置" vs "数据不一致")。
+ *
+ * sawNumericLines=true 表示输出里出现过数值行但无任何三元组通过交叉校验(数据在场但不自洽),
+ * 上层据此发"数据不一致"中性提示而非误报"未配置";=false 表示连数值行都没有(确实未配置 VSS)。
+ */
+struct VssParseResult {
+    QVector<VssAssociation> assocs;
+    bool sawNumericLines = false;
+};
+
+/**
+ * @brief 解析 vssadmin list shadowstorage 原始字节为各卷卷影副本存储关联(仅返回通过交叉校验者)。
+ *
+ * 语言无关:raw 为 OEM 字节,QString::fromLatin1 逐字节映射成 QString(0x00-0x7F 映射为对应 Unicode
+ * 码点,高字节标签映射为乱码但解析不依赖标签文字),再用仅含 ASCII 令牌的正则匹配。GBK 尾字节虽可能落在
+ * ASCII 区,但本地化标签为纯中文不含"数字+单位+空格+(数字%)"此类 ASCII 多令牌序列,且 Used/Allocated/
+ * Maximum 三行连续无标签行穿插,故不会误匹配。三条数值行按块内位置(Used→Allocated→Maximum)识别,
+ * 与本地化标签无关。每三元组经交叉校验(used≤allocated≤maximum、百分比单调、对存储卷容量 5% 容差上限)
+ * 方才采信;任一不满足则丢弃该卷(不发出可能错误的字节数),上层降级为中性提示——绝不发出未通过校验的数字。
+ */
+VssParseResult ParseVssShadowStorageRaw(const QByteArray& raw) {
+    VssParseResult result;
+    QVector<VssAssociation> out;
+    if (raw.isEmpty()) {
+        return result;
+    }
+    const QString buf = QString::fromLatin1(raw.constData(), raw.size());
+
+    static const QRegularExpression numRe(
+        QStringLiteral("([0-9]+(?:\\.[0-9]+)?)\\s+(bytes|B|KB|MB|GB|TB|PB)\\s*\\(([0-9]+)\\s*%\\)"));
+    static const QRegularExpression unboundedRe(QStringLiteral("UNBOUNDED"),
+                                                QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression pctRe(QStringLiteral("\\(([0-9]+)\\s*%\\)"));
+
+    const QStringList lines = buf.split(QRegularExpression(QStringLiteral("[\r\n]+")), Qt::SkipEmptyParts);
+
+    // 收集所有数值行(数值+单位+百分比,或 UNBOUNDED 行)及其行号、百分比。
+    struct NumLine {
+        double value;
+        qint64 mult;
+        int pct;
+        bool unbounded;
+        int idx;
+    };
+    QVector<NumLine> nums;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString& line = lines[i];
+        const QRegularExpressionMatch m = numRe.match(line);
+        if (m.hasMatch()) {
+            const qint64 mult = VssUnitMultiplier(m.captured(2));
+            if (mult < 0) {
+                continue;  // 未知单位 → 跳过,不污染三元组(后续行号不再相邻即整体降级)。
+            }
+            nums.append({m.captured(1).toDouble(), mult, m.captured(3).toInt(), false, i});
+            continue;
+        }
+        if (unboundedRe.match(line).hasMatch()) {
+            int pct = 100;
+            const QRegularExpressionMatch pm = pctRe.match(line);
+            if (pm.hasMatch()) {
+                pct = pm.captured(1).toInt();
+            }
+            nums.append({0.0, 1, pct, true, i});
+        }
+    }
+
+    // 按位置每三条行号严格相邻者为一组 = 一个关联块的 Used/Allocated/Maximum。
+    for (int k = 0; k + 2 < nums.size(); k += 3) {
+        const NumLine& a = nums[k];      // Used
+        const NumLine& b = nums[k + 1];  // Allocated
+        const NumLine& c = nums[k + 2];  // Maximum
+        if (b.idx != a.idx + 1 || c.idx != b.idx + 1) {
+            break;  // 行号不再连续 = 结构异常,放弃后续(上层降级)。
+        }
+        const qint64 used = CheckedVssMul(a.value, a.mult);
+        const qint64 allocated = CheckedVssMul(b.value, b.mult);
+        const qint64 maximum = c.unbounded ? -1 : CheckedVssMul(c.value, c.mult);
+        if (used < 0 || allocated < 0 || (!c.unbounded && maximum < 0)) {
+            continue;  // 溢出 → 丢弃该卷。
+        }
+        // 交叉校验 1:体积单调(无上限时仅 used≤allocated)。
+        if (used > allocated) {
+            continue;
+        }
+        if (!c.unbounded && allocated > maximum) {
+            continue;
+        }
+        // 交叉校验 2:百分比单调(无上限时 maximum 百分比通常 100,不约束上界)。
+        if (a.pct > b.pct) {
+            continue;
+        }
+        if (!c.unbounded && b.pct > c.pct) {
+            continue;
+        }
+        const QString label = ExtractStorageVolumeLabel(lines, a.idx);
+        // 交叉校验 3:对存储卷容量做 5% 容差上限校验(可解才校验,不可解不因之丢弃)。
+        const qint64 cap = ResolveVolumeBytesTotal(label);
+        if (cap > 0) {
+            const qint64 tolerance = cap / 20;  // 5%。
+            if (allocated > cap + tolerance || used > cap + tolerance) {
+                continue;
+            }
+        }
+        out.append({label, used, allocated, maximum});
+    }
+    result.assocs = out;
+    result.sawNumericLines = !nums.isEmpty();
+    return result;
+}
+
+/**
  * @brief 扫描系统镜像与恢复点模块。
+ *
+ * ① 核算升级/恢复残留目录(Windows.old/$WINDOWS.~BT/更新下载缓存/Recovery)占用;
+ * ② 查询卷影副本存储(VSS/还原点)实际占用——以 vssadmin list shadowstorage 子进程取数,语言无关的
+ *   ASCII 令牌位置解析 + 交叉校验,任何不确定(超时/退出码非零/无可信三元组)均降级为中性提示,
+ *   绝不发出未校验或错误的字节数(PARAMOUNT:不可回归、不可呈现错误数字)。
  * @param out 输出结果。
  */
 void ScanRestorePoint(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_bool> cancelFlag) {
@@ -3005,6 +3312,64 @@ void ScanRestorePoint(QVector<FeatureFinding>& out, std::shared_ptr<std::atomic_
                    QStringLiteral("系统备份"), QStringLiteral("系统升级、恢复或更新缓存。建议通过 Windows 系统入口处理。"),
                    root, summary.bytes);
     }
+
+    if (!IsCancelled(cancelFlag)) {
+        const VssQueryResult qr = QueryVssAdminShadowStorage(cancelFlag);
+        const VssParseResult parsed = ParseVssShadowStorageRaw(qr.raw);
+        // 仅当进程正常结束且退出码为 0、且有通过交叉校验的三元组时才发字节数;
+        // 非零退出码即使输出看似可解析也一律降级(失败的查询不可信,守"不可呈现错误数字")。
+        const bool emitFindings = !parsed.assocs.isEmpty() && qr.ran && qr.exitCode == 0;
+        if (emitFindings) {
+            for (const VssAssociation& a : parsed.assocs) {
+                if (IsCancelled(cancelFlag)) {
+                    break;
+                }
+                const QString title = QStringLiteral("卷影副本存储（%1）").arg(a.label);
+                const QString rootPath = (a.label.size() >= 2 && a.label[1] == QLatin1Char(':'))
+                                             ? (a.label + QStringLiteral("\\"))
+                                             : QString();
+                const QString maxText = (a.maximumBytes < 0)
+                                            ? QStringLiteral("无上限")
+                                            : FormatBytesText(static_cast<std::uint64_t>(a.maximumBytes));
+                const QString detail = QStringLiteral(
+                    "卷 %1 的卷影副本（还原点 / 系统保护）存储：已用 %2 / 已分配 %3 / 上限 %4。"
+                    "由系统保护策略维护，非可直接删除的垃圾；如需调整，请在「系统属性 › 系统保护」"
+                    "修改上限或删除还原点（删除将丢失对应还原点）。")
+                    .arg(a.label,
+                         FormatBytesText(static_cast<std::uint64_t>(a.usedBytes)),
+                         FormatBytesText(static_cast<std::uint64_t>(a.allocatedBytes)),
+                         maxText);
+                AddFinding(out, FeatureModule::RestorePoint, title, QStringLiteral("卷影副本存储"), detail, rootPath,
+                           static_cast<std::uint64_t>(a.usedBytes));
+            }
+        } else if (!qr.ran) {
+            // 超时/未启动/取消:中性提示,不报错不报数字。
+            AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("卷影副本存储"), QStringLiteral("查询不可用"),
+                       QStringLiteral("未能完成卷影副本存储查询（vssadmin 调用超时或不可用）。"
+                                      "可在「系统属性 › 系统保护」查看与调整。"));
+        } else if (qr.exitCode == 2) {
+            // 非提权(本应提权,意外路径):中性提示。
+            AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("卷影副本存储"), QStringLiteral("查询不可用"),
+                       QStringLiteral("查询卷影副本存储需要管理员权限。请在「系统属性 › 系统保护」查看。"));
+        } else if (qr.exitCode == 0) {
+            // 干净退出但无可信三元组:据是否见过数值行区分"数据不一致"(在场但不自洽)与"未配置"。
+            if (parsed.sawNumericLines) {
+                AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("卷影副本存储"), QStringLiteral("数据不一致"),
+                           QStringLiteral("检测到卷影副本存储数据但未能通过自洽校验（已用≤已分配≤上限），"
+                                          "为避免给出错误数字已跳过。请在「系统属性 › 系统保护」查看。"));
+            } else {
+                AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("卷影副本存储"), QStringLiteral("未配置"),
+                           QStringLiteral("本机当前未配置卷影副本存储（系统保护未启用或未占用空间）。"));
+            }
+        } else {
+            // 非零退出且无可信数据:中性提示。
+            AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("卷影副本存储"), QStringLiteral("查询不可用"),
+                       QStringLiteral("vssadmin 返回错误码 %1，未能解析卷影副本存储。"
+                                      "可在「系统属性 › 系统保护」查看与调整。")
+                           .arg(static_cast<int>(qr.exitCode)));
+        }
+    }
+
     AddFinding(out, FeatureModule::RestorePoint, QStringLiteral("系统保护入口"), QStringLiteral("系统入口"),
                QStringLiteral("卷影副本 / 还原点需要通过 Windows 系统保护界面查看和调整。"));
 }
