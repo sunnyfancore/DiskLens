@@ -2011,6 +2011,27 @@ void ScanMessengerCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomi
         {QStringLiteral("Slack"), roamingAppData + QStringLiteral("/Slack"), false},
         {QStringLiteral("Discord"), roamingAppData + QStringLiteral("/discord"), false},
         {QStringLiteral("Telegram Desktop"), roamingAppData + QStringLiteral("/Telegram Desktop"), false},
+        // 以下四类客户端目录经多源 web 核实(知乎/CSDN/cnblogs/官方帮助中心/取证文章),路径均为 Windows 本地
+        // 真实位置;PathExists 过滤不存在的目录,故版本/语言差异路径缺席即跳过,不产生误报。nature 按是否含
+        // 不可替代用户数据保守标注:接收文件/聊天库/加密密钥目录标 data(勿整目录删),仅纯 Chromium 缓存标 cache。
+        // 钉钉(DingTalk,阿里企业 IM):接收文件默认 Documents\钉钉,旧版/英文版 Documents\DingTalk(两名覆盖)。
+        // %LOCALAPPDATA%\DingTalk 为 Electron/CEF 缓存(纯可清→cache);%APPDATA%\DingTalk 虽含表情/头像缓存,
+        // 但同一 {uid}_v2 树亦含加密本地聊天库 DBFiles\dingtalk.db(钉钉云端仅存 180 天,更早历史仅此本地副本,
+        // 误清将永久丢失)——属混合 data+cache,按 data 保守标注勿整目录删(与飞书 LarkShell/WhatsApp 商店版同口径)。
+        {QStringLiteral("钉钉文件"), documents + QStringLiteral("/钉钉"), true},
+        {QStringLiteral("钉钉文件（旧版）"), documents + QStringLiteral("/DingTalk"), true},
+        {QStringLiteral("钉钉缓存"), localAppData + QStringLiteral("/DingTalk"), false},
+        {QStringLiteral("钉钉配置缓存"), roamingAppData + QStringLiteral("/DingTalk"), true},
+        // 飞书 / Lark(字节企业 IM):LarkShell 为数据+缓存根。Roaming 实例含 sdk_storage(运行时/日志,混合→保守 data);
+        // Local 实例为 GPUCache/Crashpad/日志(纯缓存→cache)。
+        {QStringLiteral("飞书数据（LarkShell）"), roamingAppData + QStringLiteral("/LarkShell"), true},
+        {QStringLiteral("飞书缓存（LarkShell）"), localAppData + QStringLiteral("/LarkShell"), false},
+        // WhatsApp:经典 Win32 安装版(APPDATA\WhatsApp,聊天库 messages.db + 接收媒体)与微软商店/UWP 版
+        // (Packages\...WhatsAppDesktop...,包根含 LocalState 聊天库 + AC/TempState/LocalCache 缓存)均含不可替代数据。
+        {QStringLiteral("WhatsApp 数据（经典版）"), roamingAppData + QStringLiteral("/WhatsApp"), true},
+        {QStringLiteral("WhatsApp 数据（商店版）"), localAppData + QStringLiteral("/Packages/5319275A.WhatsAppDesktop_cv1g1gvanyjgm"), true},
+        // Signal:加密消息库 db.sqlite + config.json(含加密密钥)+ 附件,全为不可替代用户数据。
+        {QStringLiteral("Signal 数据"), roamingAppData + QStringLiteral("/Signal"), true},
     };
 
     int emitted = 0;
@@ -2028,15 +2049,17 @@ void ScanMessengerCache(QVector<FeatureFinding>& out, std::shared_ptr<std::atomi
         // 用户数据型目录(微信/企业微信/QQ 的 Files)整目录含聊天接收的文件/图片/视频,不可当"缓存"
         // 整目录删除——原统一标"聊天缓存"会误导用户清空致数据丢失。改标"聊天客户端数据"并明确勿整目录
         // 删;真正的配置/缓存目录仍标"聊天缓存"。
-        if (candidate.isUserData) {
-            AddFinding(out, FeatureModule::MessengerCache, candidate.name, QStringLiteral("聊天客户端数据"),
-                       QStringLiteral("含聊天接收的文件/图片/视频等用户数据与部分缓存，请勿整目录删除；建议在客户端内迁移存储位置或仅清理缓存子目录。"),
-                       candidate.path, summary.bytes);
-        } else {
-            AddFinding(out, FeatureModule::MessengerCache, candidate.name, QStringLiteral("聊天缓存"),
-                       QStringLiteral("聊天客户端本地文件和缓存。建议优先在客户端内清理或迁移存储位置。"),
-                       candidate.path, summary.bytes);
+        QString detail = candidate.isUserData
+            ? QStringLiteral("含聊天接收的文件/图片/视频等用户数据与部分缓存，请勿整目录删除；建议在客户端内迁移存储位置或仅清理缓存子目录。")
+            : QStringLiteral("聊天客户端本地文件和缓存。建议优先在客户端内清理或迁移存储位置。");
+        if (summary.truncated) {
+            // 条目数超 ComputePathSizeLimited 枚举上限(30000),bytes 为部分累加下限;披露以免用户高估可回收量
+            // (与 ScanDockerWsl/ScanSoftwareFootprint/ScanStartupFootprint 等模块同口径,本模块原吞掉此标记)。
+            detail += QStringLiteral("（条目数较多，本机估算为下限，实际占用可能更高）");
         }
+        AddFinding(out, FeatureModule::MessengerCache, candidate.name,
+                   candidate.isUserData ? QStringLiteral("聊天客户端数据") : QStringLiteral("聊天缓存"),
+                   detail, candidate.path, summary.bytes);
         ++emitted;
     }
 
