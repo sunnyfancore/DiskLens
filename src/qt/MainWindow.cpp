@@ -2282,12 +2282,15 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     }
     if (healthWorkerThread_ != nullptr) {
         healthWorkerThread_->quit();   // 投递退出事件到 worker 事件循环(若正卡在 QueryAll,完成后才处理)。
-        if (healthWorkerThread_->wait(5000)) {
+        // 等待预算 2s(由 5s 收紧):正常 SSD 系统 QueryAll 亚秒级,2s 足以干净 join;QueryAll 本身不可取消,
+        // 慢盘(休眠 HDD 盘片起转 / 卡顿 USB-SATA / 慢 RAID)超预算即走下方 setParent(nullptr) 异步降级,
+        // 由 quitting_ 守卫保证安全,缩短用户可感的关窗卡顿。
+        if (healthWorkerThread_->wait(2000)) {
             // 线程已 join:显式回收 worker,避免 deleteLater 排在已退出的事件循环里漏排(每进程仅一个,无害但求干净)。
             delete healthWorker_;
             healthWorker_ = nullptr;
         } else {
-            // 极端慢盘(休眠唤醒的 HDD / 卡顿 USB-SATA / 慢 RAID)可能让一次同步 QueryAll 超过 5s。
+            // 极端慢盘(休眠唤醒的 HDD / 卡顿 USB-SATA / 慢 RAID)可能让一次同步 QueryAll 超过 2s 预算。
             // wait 超时后若 healthWorkerThread_ 仍为 this 子对象,~MainWindow 析构会销毁运行中的 QThread,
             // 触发 qFatal("QThread: Destroyed while thread is still running")→ abort。解除父子关系让其异步自终:
             // QueryAll 完成后由 quitting_ 守卫跳过回投 this,线程处理 quit 后退出,不再阻塞主窗口析构。

@@ -4412,11 +4412,11 @@ void FeatureHubWidget::CancelScan() {
 }
 
 void FeatureHubWidget::JoinWorkerBounded() {
-    // 镜像 MainWindow health worker 的 wait+detach 降级:轮询完成标志最多约 2 秒,worker 已结束则即时
+    // 镜像 MainWindow health worker 的 wait+detach 降级:轮询完成标志最多约 1 秒,worker 已结束则即时
     // join 回收;超时(极慢盘 / Restart Manager / 未来的 QProcess 阻塞调用)则 detach 解除阻塞,退出靠
-    // quitting_ 守卫 + 回投前 QPointer 判空兜底,杜绝「关窗卡死」。预算取 2s(而非 health 的 5s):工具箱
-    // cancel 粒度更细(每模块间 / 每目录条目),与下方 health worker wait(5000) 串行后总关窗最坏 ~7s,不致假死。
-    constexpr int kPollRounds = 20;   // 20 × 100ms = 2s。
+    // quitting_ 守卫 + 回投前 QPointer 判空兜底,杜绝「关窗卡死」。预算取 1s(而非 health 的 2s):工具箱
+    // cancel 先置且粒度更细(每模块间 / 每目录条目),正常扫描秒级 bail,1s 足够;串行后总关窗最坏 ~3s,不致假死。
+    constexpr int kPollRounds = 10;   // 10 × 100ms = 1s。
     // 快照当前在途标志:关闭/析构路径不会启动新 worker,这里持引用防极少数竞态下被新一轮覆盖。
     const std::shared_ptr<std::atomic_bool> finished = workerFinishedFlag_;
     for (int i = 0; i < kPollRounds; ++i) {
@@ -4445,11 +4445,16 @@ void FeatureHubWidget::RequestShutdownForQuit() {
 
 FeatureHubWidget::~FeatureHubWidget() {
     // 析构路径同样收尾:置退出 + 取消 + 有界 join,确保 widget 销毁时无后台线程回投悬垂 this。
+    // 若 closeEvent 已调 RequestShutdownForQuit 完成收尾(join 或 detach 后 scanWorker_ 不再 joinable),
+    // 跳过重复轮询——避免正常关窗后析构阶段再空等一次完整轮询预算,缩短进程退出耗时。
+    // 仍 joinable(未经 closeEvent 的销毁场景,如标签页重建 / 直接销毁)时照常有界 join,防御不漏。
     quitting_.store(true);
     if (cancelFlag_ != nullptr) {
         cancelFlag_->store(true);
     }
-    JoinWorkerBounded();
+    if (scanWorker_.joinable()) {
+        JoinWorkerBounded();
+    }
 }
 
 void FeatureHubWidget::RefreshModuleFilter() {
