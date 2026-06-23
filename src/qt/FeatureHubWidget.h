@@ -21,6 +21,7 @@ class QPoint;
 class QPushButton;
 class QTreeWidget;
 class QToolButton;
+class QFrame;
 
 namespace disk_lens::qt_ui {
 
@@ -230,6 +231,24 @@ private:
      * @brief 更新按钮可用状态。
      */
     void UpdateActionState();
+
+    /**
+     * @brief 按当前选中模块刷新"是什么/怎么用/提示"说明面板。
+     *
+     * 选中具体模块时显示该模块的用途与操作流程;选中"全部能力"时显示工具箱总览。
+     * 在 RefreshModuleFilter 末尾(单一漏斗,覆盖所有选择/筛选调用点)与构造函数首绘后调用。
+     */
+    void UpdateModuleGuide();
+
+    /**
+     * @brief 关闭首次使用向导条并持久化"已看过"标志。
+     */
+    void DismissOnboarding();
+
+    /**
+     * @brief 打开可重开的"空间工具箱 · 导览"对话框,列出全部分类与模块说明。
+     */
+    void ShowGuideDialog();
 
     /**
      * @brief 设置忙碌状态。
@@ -518,6 +537,36 @@ private:
      * @brief 顶部状态标签。
      */
     QLabel* statusLabel_ = nullptr;
+
+    /**
+     * @brief 首次使用向导条(可关闭,持久化 onboardingSeen)。
+     */
+    QFrame* onboardingBanner_ = nullptr;
+
+    /**
+     * @brief 工具栏"导览"按钮(重开 ShowGuideDialog)。
+     */
+    QPushButton* helpButton_ = nullptr;
+
+    /**
+     * @brief 当前选中模块的"是什么/怎么用/提示"说明面板。
+     */
+    QFrame* moduleGuideFrame_ = nullptr;
+
+    /**
+     * @brief 模块用途(是什么)说明。
+     */
+    QLabel* guidePurposeLabel_ = nullptr;
+
+    /**
+     * @brief 模块操作流程(怎么用)说明。
+     */
+    QLabel* guideHowToUseLabel_ = nullptr;
+
+    /**
+     * @brief 模块操作提示。
+     */
+    QLabel* guideTipsLabel_ = nullptr;
 
     /**
      * @brief 结果数量指标。

@@ -77,6 +77,29 @@ namespace disk_lens::qt_ui {
 namespace {
 
 /**
+ * @brief 工具箱模块的分组类别(导览与分组用)。
+ *
+ * 渲染顺序按"空间紧张的用户最想要的先":Reclaim 清理回收 → Inventory 占用盘点
+ * → Migrate 迁移搬家 → Audit 检查防护。分类仅用于列表分组与导览文案,**不影响枚举顺序、
+ * 扫描顺序或稳定键**。
+ */
+enum class ModuleCategory {
+    Reclaim,
+    Inventory,
+    Migrate,
+    Audit,
+};
+
+/**
+ * @brief 分类标签与导览简介。
+ */
+struct CategoryInfo {
+    ModuleCategory category = ModuleCategory::Reclaim;
+    QString label;
+    QString blurb;
+};
+
+/**
  * @brief 单个工具箱模块的展示元数据。
  */
 struct ModuleInfo {
@@ -91,9 +114,29 @@ struct ModuleInfo {
     QString title;
 
     /**
-     * @brief 模块说明。
+     * @brief 模块说明(悬停 tooltip / 结果说明用)。
      */
     QString description;
+
+    /**
+     * @brief 所属分组类别(列表分组用)。
+     */
+    ModuleCategory category = ModuleCategory::Reclaim;
+
+    /**
+     * @brief 模块用途(是什么):说明面板与导览对话框用。
+     */
+    QString purpose;
+
+    /**
+     * @brief 操作流程(怎么用):分步骤说明。
+     */
+    QString howToUse;
+
+    /**
+     * @brief 操作提示:路径输入指引、口径与注意事项(安全声明由面板统一追加,不重复写)。
+     */
+    QString tips;
 };
 
 /**
@@ -191,27 +234,171 @@ bool IsCancelled(const std::shared_ptr<std::atomic_bool>& cancelFlag) {
  */
 QVector<ModuleInfo> AllModules() {
     return {
-        {FeatureModule::GrowthTrace, QStringLiteral("空间增长溯源"), QStringLiteral("列出近 7 天新写入或修改的大文件，及累计偏大的目录（按修改时间，非增量测量）")},
-        {FeatureModule::SoftwareFootprint, QStringLiteral("软件体积管理器"), QStringLiteral("估算已安装软件及安装目录真实占用")},
-        {FeatureModule::AppMover, QStringLiteral("应用 / 游戏搬家"), QStringLiteral("识别适合迁移的大型应用和游戏目录并生成迁移计划（不校验目标盘空间、不执行迁移）")},
-        {FeatureModule::ArchiveAssistant, QStringLiteral("归档助手"), QStringLiteral("为长期未动资料生成迁移归档计划")},
-        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"), QStringLiteral("按类型统计下载和桌面文件的体积与数量并给出整理建议（只报告不移动；可在源路径追加目录）")},
-        {FeatureModule::PrivacyRadar, QStringLiteral("隐私文件雷达"), QStringLiteral("发现密钥、证书、合同和身份信息等敏感文件")},
-        {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"), QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境")},
-        {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"), QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘并核算真实占用,提示压缩 / prune 途径")},
-        {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"), QStringLiteral("按媒体类型、年代和体积生成整理建议")},
-        {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"), QStringLiteral("给常用目录套参考预算并标记超额位置,另只读查询 NTFS 卷配额启用状态")},
-        {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"), QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本")},
-        {FeatureModule::FileUnlocker, QStringLiteral("文件占用识别器"), QStringLiteral("用 Windows Restart Manager 识别占用进程（仅识别不自动解锁）")},
-        {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"), QStringLiteral("估算迁移体积、目标盘空间和执行计划")},
-        {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"), QStringLiteral("识别同步盘本地占用、冲突文件和大缓存")},
-        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"), QStringLiteral("核算 Windows.old、更新备份与恢复目录占用，并查询卷影副本存储（VSS/还原点）实际占用；可在系统保护入口调整。")},
-        {FeatureModule::BrowserCache, QStringLiteral("浏览器缓存中心"), QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器缓存和离线数据")},
-        {FeatureModule::StartupFootprint, QStringLiteral("启动项体积检查"), QStringLiteral("盘点开机启动入口及其关联程序占用")},
-        {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"), QStringLiteral("识别微信、企业微信、QQ、Teams 等聊天客户端的本地数据与缓存")},
-        {FeatureModule::MailArchive, QStringLiteral("邮件归档库检查"), QStringLiteral("发现 PST、OST、MBOX 等邮件归档和离线邮箱文件")},
-        {FeatureModule::VirtualMachineImages, QStringLiteral("虚拟机镜像管理"), QStringLiteral("发现 VHD、VMDK、VDI、QCOW2 等大型虚拟磁盘")},
+        {FeatureModule::GrowthTrace, QStringLiteral("空间增长溯源"),
+         QStringLiteral("列出近 7 天新写入或修改的大文件，及累计偏大的目录（按修改时间，非增量测量）"),
+         ModuleCategory::Inventory,
+         QStringLiteral("找出近 7 天新写入或明显变大的文件与目录，定位空间“涨在哪”。"),
+         QStringLiteral("①选中本模块（可选填源路径缩小范围）\n②点“当前模块”体检\n③按“大小”列排序看大户。"),
+         QStringLiteral("不填源路径则扫描用户目录与各盘根；按修改时间统计，非逐字节增量测量。")},
+        {FeatureModule::SoftwareFootprint, QStringLiteral("软件体积管理器"),
+         QStringLiteral("估算已安装软件及安装目录真实占用"),
+         ModuleCategory::Inventory,
+         QStringLiteral("估算已安装软件及其安装目录的真实占用。"),
+         QStringLiteral("①选中本模块\n②点“当前模块”体检\n③按“大小”排序，定位最占地的软件。"),
+         QStringLiteral("以安装目录为主、注册表估算为辅；嵌套目录已去重。")},
+        {FeatureModule::AppMover, QStringLiteral("应用 / 游戏搬家"),
+         QStringLiteral("识别适合迁移的大型应用和游戏目录并生成迁移计划（不校验目标盘空间、不执行迁移）"),
+         ModuleCategory::Migrate,
+         QStringLiteral("识别适合迁移的大型应用 / 游戏目录，生成迁移计划（含 robocopy / mklink 命令）。"),
+         QStringLiteral("①填“目标路径”（要搬到哪个盘）\n②选中本模块体检\n③对结果点“处理方案”看迁移命令。"),
+         QStringLiteral("不校验目标盘空间、不执行迁移；Steam / Epic 等多盘库自动识别。")},
+        {FeatureModule::ArchiveAssistant, QStringLiteral("归档助手"),
+         QStringLiteral("为长期未动资料生成迁移归档计划"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("为长期未动的资料生成归档 / 迁移计划，腾出活跃空间。"),
+         QStringLiteral("①填“源路径”（要整理的目录）与可选“目标路径”\n②体检\n③看处理方案。"),
+         QStringLiteral("目录级汇总并按陈旧程度排序；只生成计划不移动。")},
+        {FeatureModule::DownloadOrganizer, QStringLiteral("下载整理中心"),
+         QStringLiteral("按类型统计下载和桌面文件的体积与数量并给出整理建议（只报告不移动；可在源路径追加目录）"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("按类型统计下载与桌面文件的体积、数量，给整理建议。"),
+         QStringLiteral("①可选填源路径（默认下载 / 桌面）\n②体检\n③按类型看可清理项。"),
+         QStringLiteral("只报告不移动；可在源路径追加多个目录。")},
+        {FeatureModule::PrivacyRadar, QStringLiteral("隐私文件雷达"),
+         QStringLiteral("发现密钥、证书、合同和身份信息等敏感文件"),
+         ModuleCategory::Audit,
+         QStringLiteral("发现密钥、证书、合同、身份信息及浏览器凭据等敏感文件。"),
+         QStringLiteral("①选中本模块体检\n②按“敏感文件 / 凭据风险”等级排查\n③导出清单集中处置。"),
+         QStringLiteral("仅识别位置，不读取内容、不上传；含浏览器凭据库定向扫描。")},
+        {FeatureModule::DeveloperSpace, QStringLiteral("开发环境空间中心"),
+         QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境"),
+         ModuleCategory::Inventory,
+         QStringLiteral("定位 node_modules、构建产物、包缓存和虚拟环境等开发占用。"),
+         QStringLiteral("①可选填源路径（默认用户目录）\n②体检\n③按大小清理可重建的产物。"),
+         QStringLiteral("区分可清理缓存与需保留的源码；包缓存按引擎识别。")},
+        {FeatureModule::DockerWsl, QStringLiteral("Docker / WSL 空间管理"),
+         QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘并核算真实占用,提示压缩 / prune 途径"),
+         ModuleCategory::Inventory,
+         QStringLiteral("枚举 WSL2 发行版与 Docker 虚拟磁盘，核算真实占用并提示压缩 / prune 途径。"),
+         QStringLiteral("①选中本模块体检\n②看 vhdx 实占与可回收量\n③按处理方案压缩 / prune。"),
+         QStringLiteral("稀疏盘报实占；只读查询，绝不自动 prune。")},
+        {FeatureModule::MediaOrganizer, QStringLiteral("照片 / 视频整理器"),
+         QStringLiteral("按媒体类型、年代和体积生成整理建议"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("按媒体类型、年代和体积生成照片 / 视频整理建议。"),
+         QStringLiteral("①填源路径（照片 / 视频所在目录）\n②体检\n③按年代或体积折叠查看。"),
+         QStringLiteral("互斥类型分组；只生成建议不移动。")},
+        {FeatureModule::QuotaBudget, QStringLiteral("磁盘配额与预算"),
+         QStringLiteral("给常用目录套参考预算并标记超额位置,另只读查询 NTFS 卷配额启用状态"),
+         ModuleCategory::Audit,
+         QStringLiteral("给常用目录套参考预算标记超额，并只读查询 NTFS 卷配额状态。"),
+         QStringLiteral("①选中本模块体检\n②看哪些目录超预算\n③按需在系统配额入口调整。"),
+         QStringLiteral("配额查询为只读；预算为参考值。")},
+        {FeatureModule::BackupGap, QStringLiteral("备份缺口检查"),
+         QStringLiteral("核对重要目录的备份完整性、时效与本地目标，并提示可能存在的异地副本"),
+         ModuleCategory::Audit,
+         QStringLiteral("核对重要目录的备份完整性、时效与本地目标，提示可能的异地副本。"),
+         QStringLiteral("①填源路径（要核查的目录）与可选目标路径\n②体检\n③看陈旧 / 不完整 / 缺口。"),
+         QStringLiteral("只核对不备份；暴露备份健康度供判断。")},
+        {FeatureModule::FileUnlocker, QStringLiteral("文件占用识别器"),
+         QStringLiteral("用 Windows Restart Manager 识别占用进程（仅识别不自动解锁）"),
+         ModuleCategory::Audit,
+         QStringLiteral("用 Windows Restart Manager 识别占用文件 / 目录的进程。"),
+         QStringLiteral("①填源路径（被占用的文件 / 目录）\n②体检\n③看占用进程，自行决定关闭。"),
+         QStringLiteral("仅识别占用、不自动解锁；按抽样披露，避免误报。")},
+        {FeatureModule::TransferAssistant, QStringLiteral("大文件传输助手"),
+         QStringLiteral("估算迁移体积、目标盘空间和执行计划"),
+         ModuleCategory::Migrate,
+         QStringLiteral("估算迁移体积、目标盘剩余空间并生成传输计划。"),
+         QStringLiteral("①填源路径（要搬的大文件 / 目录）与目标路径\n②体检\n③看空间是否充足及执行步骤。"),
+         QStringLiteral("源为空时自动发现大目录候选；FAT32 + >4GB 会提示限制。")},
+        {FeatureModule::CloudSync, QStringLiteral("同步盘空间分析"),
+         QStringLiteral("识别同步盘本地占用、冲突文件和大缓存"),
+         ModuleCategory::Inventory,
+         QStringLiteral("识别同步盘本地占用、冲突文件和大缓存。"),
+         QStringLiteral("①选中本模块体检\n②看同步盘占用分布\n③处理冲突文件与大缓存。"),
+         QStringLiteral("大缓存折叠明细；只读分析不改动同步状态。")},
+        {FeatureModule::RestorePoint, QStringLiteral("系统镜像 / 恢复点管理"),
+         QStringLiteral("核算 Windows.old、更新备份与恢复目录占用，并查询卷影副本存储（VSS/还原点）实际占用；可在系统保护入口调整。"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("核算 Windows.old、更新备份、恢复目录及卷影副本（VSS）实际占用。"),
+         QStringLiteral("①选中本模块体检\n②看各类系统残留与 VSS 占用\n③在系统保护入口调整。"),
+         QStringLiteral("VSS 经 vssadmin 只读查询；查询失败优雅降级，不报错数字。")},
+        {FeatureModule::BrowserCache, QStringLiteral("浏览器缓存中心"),
+         QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器缓存和离线数据"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("识别 Chrome、Edge、Firefox 等浏览器的缓存和离线数据。"),
+         QStringLiteral("①选中本模块体检\n②按大小看各浏览器缓存\n③按处理方案清理。"),
+         QStringLiteral("区分可清理缓存与需保留的登录数据；只识别不清理。")},
+        {FeatureModule::StartupFootprint, QStringLiteral("启动项体积检查"),
+         QStringLiteral("盘点开机启动入口及其关联程序占用"),
+         ModuleCategory::Inventory,
+         QStringLiteral("盘点开机启动入口及其关联程序的真实占用。"),
+         QStringLiteral("①选中本模块体检\n②看各启动项的安装目录占用\n③决定是否禁用。"),
+         QStringLiteral("回溯 exe 安装目录估算；区分启用 / 禁用状态。")},
+        {FeatureModule::MessengerCache, QStringLiteral("聊天缓存治理"),
+         QStringLiteral("识别微信、企业微信、QQ、Teams 等聊天客户端的本地数据与缓存"),
+         ModuleCategory::Reclaim,
+         QStringLiteral("识别微信、企业微信、QQ、钉钉、飞书等聊天客户端的本地数据与缓存。"),
+         QStringLiteral("①选中本模块体检\n②看各客户端缓存占用\n③区分可清理缓存与消息记录。"),
+         QStringLiteral("按客户端与子目录拆分；消息记录保留、仅缓存可清。")},
+        {FeatureModule::MailArchive, QStringLiteral("邮件归档库检查"),
+         QStringLiteral("发现 PST、OST、MBOX 等邮件归档和离线邮箱文件"),
+         ModuleCategory::Inventory,
+         QStringLiteral("发现 PST、OST、MBOX 等邮件归档和离线邮箱文件。"),
+         QStringLiteral("①选中本模块体检\n②看邮件库占用\n③按需在客户端中归档 / 压缩。"),
+         QStringLiteral("稀疏 OST 报实占；只识别不改动邮箱。")},
+        {FeatureModule::VirtualMachineImages, QStringLiteral("虚拟机镜像管理"),
+         QStringLiteral("发现 VHD、VMDK、VDI、QCOW2 等大型虚拟磁盘"),
+         ModuleCategory::Inventory,
+         QStringLiteral("发现 VHD、VMDK、VDI、QCOW2 等大型虚拟磁盘文件。"),
+         QStringLiteral("①选中本模块体检\n②看各虚拟盘占用\n③按需迁移或压缩。"),
+         QStringLiteral("稀疏盘报实占；只识别不改动虚拟机。")},
     };
+}
+
+/**
+ * @brief 返回分组分类的标签与导览简介(渲染顺序)。
+ */
+QVector<CategoryInfo> AllCategories() {
+    return {
+        {ModuleCategory::Reclaim, QStringLiteral("清理回收"), QStringLiteral("缓存、下载、旧资料——清掉能立刻腾出空间的项。")},
+        {ModuleCategory::Inventory, QStringLiteral("占用盘点"), QStringLiteral("看清哪些软件、目录、虚拟盘在占地方。")},
+        {ModuleCategory::Migrate, QStringLiteral("迁移搬家"), QStringLiteral("把大应用或大文件挪到其他盘。")},
+        {ModuleCategory::Audit, QStringLiteral("检查防护"), QStringLiteral("体检备份、配额、隐私与文件占用，只看不改。")},
+    };
+}
+
+/**
+ * @brief 查模块所属分类(单一真相源,列表与说明面板共用,防漂移)。
+ */
+ModuleCategory CategoryOf(FeatureModule module) {
+    for (const ModuleInfo& info : AllModules()) {
+        if (info.module == module) {
+            return info.category;
+        }
+    }
+    return ModuleCategory::Reclaim;
+}
+
+/**
+ * @brief 查模块完整元数据;未命中返回空标志。
+ */
+bool FindModuleInfo(FeatureModule module, ModuleInfo& out) {
+    for (const ModuleInfo& info : AllModules()) {
+        if (info.module == module) {
+            out = info;
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief 统一的安全声明:工具箱只识别 / 生成方案 / 导出,不执行删除或迁移。
+ */
+QString GuideSafetyNote() {
+    return QStringLiteral("本工具箱只做识别、生成方案与导出报告，不会删除或迁移你的文件。");
 }
 
 /**
@@ -3531,6 +3718,30 @@ FeatureHubWidget::FeatureHubWidget(QWidget* parent) : QWidget(parent) {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
 
+    // 首次使用向导条(可关闭,持久化 featureHub/onboardingSeen)。可见性在 LoadSettings 里按标志设置。
+    onboardingBanner_ = new QFrame(this);
+    onboardingBanner_->setObjectName(QStringLiteral("OnboardingBanner"));
+    auto* onbLayout = new QVBoxLayout(onboardingBanner_);
+    onbLayout->setContentsMargins(16, 12, 16, 12);
+    onbLayout->setSpacing(6);
+    auto* onbTitle = new QLabel(QStringLiteral("首次使用空间工具箱？"), onboardingBanner_);
+    onbTitle->setObjectName(QStringLiteral("OnboardingTitle"));
+    auto* onbBody = new QLabel(QStringLiteral(
+        "这里把磁盘空间工具按“清理回收 / 占用盘点 / 迁移搬家 / 检查防护”四类整理。"
+        "三步上手：①从左侧选一个模块（或先点“全部体检”看全貌）；②按需填源 / 目标路径；"
+        "③点“当前模块”体检，看结果后用“处理方案 / 交付”导出清单。工具箱只识别与生成方案，不会删除或迁移你的文件。"), onboardingBanner_);
+    onbBody->setObjectName(QStringLiteral("OnboardingBody"));
+    onbBody->setWordWrap(true);
+    auto* onbDismiss = new QPushButton(QStringLiteral("知道了"), onboardingBanner_);
+    onbDismiss->setObjectName(QStringLiteral("OnboardingDismiss"));
+    auto* onbRow = new QHBoxLayout();
+    onbRow->addStretch(1);
+    onbRow->addWidget(onbDismiss);
+    onbLayout->addWidget(onbTitle);
+    onbLayout->addWidget(onbBody);
+    onbLayout->addLayout(onbRow);
+    connect(onbDismiss, &QPushButton::clicked, this, &FeatureHubWidget::DismissOnboarding);
+
     auto* hero = new QFrame(this);
     hero->setObjectName(QStringLiteral("CleanupHero"));
     auto* heroLayout = new QVBoxLayout(hero);
@@ -3556,11 +3767,13 @@ FeatureHubWidget::FeatureHubWidget(QWidget* parent) : QWidget(parent) {
     splitter->setStretchFactor(1, 1);
     splitter->setSizes(QList<int>{260, 860});
 
+    layout->addWidget(onboardingBanner_);
     layout->addWidget(hero);
     layout->addWidget(splitter, 1);
     LoadWorkflowState();
     LoadResultCache();
     UpdateActionState();
+    UpdateModuleGuide();
 }
 
 QWidget* FeatureHubWidget::CreateToolbar() {
@@ -3617,6 +3830,8 @@ QWidget* FeatureHubWidget::CreateToolbar() {
     baselineButton_ = new QPushButton(QStringLiteral("保存基线"), toolbar);
     showIgnoredButton_ = new QPushButton(QStringLiteral("显示忽略"), toolbar);
     showIgnoredButton_->setCheckable(true);
+    helpButton_ = new QPushButton(QStringLiteral("导览"), toolbar);
+    helpButton_->setToolTip(QStringLiteral("打开空间工具箱导览：分类说明、每个模块的用法与操作流程"));
 
     pathLayout->addWidget(sourcePathEdit_, 3);
     pathLayout->addWidget(sourceButton);
@@ -3635,6 +3850,7 @@ QWidget* FeatureHubWidget::CreateToolbar() {
     actionLayout->addWidget(deliveryMenuButton_);
     actionLayout->addWidget(baselineButton_);
     actionLayout->addWidget(showIgnoredButton_);
+    actionLayout->addWidget(helpButton_);
     actionLayout->addStretch(1);
 
     rootLayout->addWidget(pathRow);
@@ -3657,6 +3873,7 @@ QWidget* FeatureHubWidget::CreateToolbar() {
     connect(taskChecklistAction, &QAction::triggered, this, &FeatureHubWidget::ExportTaskChecklist);
     connect(baselineButton_, &QPushButton::clicked, this, &FeatureHubWidget::SaveCurrentBaseline);
     connect(showIgnoredButton_, &QPushButton::clicked, this, &FeatureHubWidget::ToggleShowIgnored);
+    connect(helpButton_, &QPushButton::clicked, this, &FeatureHubWidget::ShowGuideDialog);
     connect(sourcePathEdit_, &QLineEdit::editingFinished, this, &FeatureHubWidget::SaveSettings);
     connect(targetPathEdit_, &QLineEdit::editingFinished, this, &FeatureHubWidget::SaveSettings);
 
@@ -3665,17 +3882,42 @@ QWidget* FeatureHubWidget::CreateToolbar() {
 
 QWidget* FeatureHubWidget::CreateModuleList() {
     moduleList_ = new QListWidget(this);
-    moduleList_->setObjectName(QStringLiteral("DirectoryTree"));
+    // 原 objectName "DirectoryTree" 与主窗口目录树共享 QSS;改为独立 "ModuleList" 以免分类标题/列表
+    // 样式污染主树,并允许本页单独设置列表外观。
+    moduleList_->setObjectName(QStringLiteral("ModuleList"));
     moduleList_->setUniformItemSizes(true);
     moduleList_->setIconSize(QSize(16, 16));
 
     auto* allItem = new QListWidgetItem(app_icons::info(16), QStringLiteral("全部能力"), moduleList_);
     allItem->setData(Qt::UserRole, -1);
 
-    for (const ModuleInfo& info : AllModules()) {
-        auto* item = new QListWidgetItem(app_icons::folder(16), info.title, moduleList_);
-        item->setToolTip(info.description);
-        item->setData(Qt::UserRole, ModuleToInt(info.module));
+    // 分类标题项用 Qt::ItemIsEnabled(启用但不可选):正常渲染、不灰化;鼠标点击不选中,
+    // 键盘导航即便落在其上,CurrentModule 的 value<0 分支(UserRole=-2)会当作"全部能力"显示,
+    // 等价于未选具体模块——无副作用、不崩。加粗字体区分于模块项。
+    QFont headerFont = moduleList_->font();
+    headerFont.setBold(true);
+
+    const QVector<ModuleInfo> all = AllModules();
+    for (const CategoryInfo& cat : AllCategories()) {
+        int count = 0;
+        for (const ModuleInfo& info : all) {
+            if (info.category == cat.category) {
+                ++count;
+            }
+        }
+        auto* header = new QListWidgetItem(QStringLiteral("%1（%2）").arg(cat.label).arg(count), moduleList_);
+        header->setFont(headerFont);
+        header->setData(Qt::UserRole, -2);
+        header->setFlags(Qt::ItemIsEnabled);
+
+        for (const ModuleInfo& info : all) {
+            if (info.category != cat.category) {
+                continue;
+            }
+            auto* item = new QListWidgetItem(app_icons::folder(16), info.title, moduleList_);
+            item->setToolTip(info.description);
+            item->setData(Qt::UserRole, ModuleToInt(info.module));
+        }
     }
     moduleList_->setCurrentRow(0);
     connect(moduleList_, &QListWidget::currentRowChanged, this, &FeatureHubWidget::RefreshModuleFilter);
@@ -3687,6 +3929,29 @@ QWidget* FeatureHubWidget::CreateResultTree() {
     auto* layout = new QVBoxLayout(host);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
+
+    // 模块说明面板(常驻,会用·核心):选中模块即显示"是什么/怎么用/提示",
+    // 选中"全部能力"显示工具箱总览。置于指标行之上,树 stretch 1 不受影响。
+    moduleGuideFrame_ = new QFrame(host);
+    moduleGuideFrame_->setObjectName(QStringLiteral("ModuleGuide"));
+    auto* guideLayout = new QVBoxLayout(moduleGuideFrame_);
+    guideLayout->setContentsMargins(12, 8, 12, 8);
+    guideLayout->setSpacing(3);
+    guidePurposeLabel_ = new QLabel(moduleGuideFrame_);
+    guidePurposeLabel_->setObjectName(QStringLiteral("ModuleGuidePurpose"));
+    guidePurposeLabel_->setWordWrap(true);
+    guidePurposeLabel_->setTextFormat(Qt::PlainText);
+    guideHowToUseLabel_ = new QLabel(moduleGuideFrame_);
+    guideHowToUseLabel_->setObjectName(QStringLiteral("ModuleGuideHowTo"));
+    guideHowToUseLabel_->setWordWrap(true);
+    guideHowToUseLabel_->setTextFormat(Qt::PlainText);
+    guideTipsLabel_ = new QLabel(moduleGuideFrame_);
+    guideTipsLabel_->setObjectName(QStringLiteral("ModuleGuideTips"));
+    guideTipsLabel_->setWordWrap(true);
+    guideTipsLabel_->setTextFormat(Qt::PlainText);
+    guideLayout->addWidget(guidePurposeLabel_);
+    guideLayout->addWidget(guideHowToUseLabel_);
+    guideLayout->addWidget(guideTipsLabel_);
 
     auto* metricRow = new QWidget(host);
     auto* metricLayout = new QHBoxLayout(metricRow);
@@ -3759,9 +4024,29 @@ QWidget* FeatureHubWidget::CreateResultTree() {
         RefreshModuleFilter();
     });
 
+    layout->addWidget(moduleGuideFrame_);
     layout->addWidget(metricRow);
     layout->addWidget(resultTree_, 1);
     return host;
+}
+
+void FeatureHubWidget::UpdateModuleGuide() {
+    if (guidePurposeLabel_ == nullptr || guideHowToUseLabel_ == nullptr || guideTipsLabel_ == nullptr) {
+        return;
+    }
+    bool hasModule = false;
+    const FeatureModule module = CurrentModule(hasModule);
+    ModuleInfo info;
+    if (hasModule && FindModuleInfo(module, info)) {
+        guidePurposeLabel_->setText(QStringLiteral("是什么：") + info.purpose);
+        guideHowToUseLabel_->setText(QStringLiteral("怎么用：") + info.howToUse);
+        guideTipsLabel_->setText(QStringLiteral("提示：") + info.tips + QStringLiteral(" ") + GuideSafetyNote());
+        return;
+    }
+    // 未选具体模块("全部能力"或分类标题):显示工具箱总览 + 三步上手。
+    guidePurposeLabel_->setText(QStringLiteral("是什么：空间工具箱集中了清理回收、占用盘点、迁移搬家、检查防护四类只读工具，帮你找出磁盘上哪些东西占地方、能不能清 / 搬 / 查。"));
+    guideHowToUseLabel_->setText(QStringLiteral("怎么用：①先点“全部体检”看全貌，或从左侧选一个模块细看\n②可选填源 / 目标路径（部分模块需要）\n③看结果后用“处理方案 / 方案包 / 交付”导出处置清单"));
+    guideTipsLabel_->setText(QStringLiteral("提示：") + GuideSafetyNote());
 }
 
 void FeatureHubWidget::BrowseSourcePath() {
@@ -3793,6 +4078,10 @@ void FeatureHubWidget::LoadSettings() {
         if (!target.isEmpty()) {
             targetPathEdit_->setText(QDir::toNativeSeparators(target));
         }
+    }
+    if (onboardingBanner_ != nullptr) {
+        // 默认未看过→显示向导条;点过"知道了"→持久化 true 后隐藏。
+        onboardingBanner_->setVisible(!settings.value(QStringLiteral("featureHub/onboardingSeen"), false).toBool());
     }
 }
 
@@ -4294,6 +4583,7 @@ void FeatureHubWidget::RefreshModuleFilter() {
         baselineCountLabel_->setText(QStringLiteral("基线 %1").arg(baselineFindingKeys_.size()));
     }
     UpdateActionState();
+    UpdateModuleGuide();
 }
 
 void FeatureHubWidget::OpenSelectedPath() {
@@ -4521,6 +4811,65 @@ void FeatureHubWidget::SaveCurrentBaseline() {
         statusLabel_->setText(QStringLiteral("已保存基线：%1 条结果。后续扫描将标记新增 / 持续。").arg(baselineFindingKeys_.size()));
     }
     RefreshModuleFilter();
+}
+
+void FeatureHubWidget::DismissOnboarding() {
+    QSettings settings(QStringLiteral("SunnyFan"), QStringLiteral("DiskLens"));
+    settings.setValue(QStringLiteral("featureHub/onboardingSeen"), true);
+    if (onboardingBanner_ != nullptr) {
+        onboardingBanner_->setVisible(false);
+    }
+}
+
+void FeatureHubWidget::ShowGuideDialog() {
+    // 与组件 B 同源生成(AllCategories + AllModules),分类与说明永不漂移。
+    QString text;
+    text += QStringLiteral("空间工具箱 · 导览\n\n");
+    text += QStringLiteral("把磁盘空间工具按四类整理；所有模块只识别与生成方案，不会删除或迁移你的文件。\n\n");
+
+    const QVector<ModuleInfo> all = AllModules();
+    for (const CategoryInfo& cat : AllCategories()) {
+        text += QStringLiteral("【%1】%2\n").arg(cat.label, cat.blurb);
+        for (const ModuleInfo& info : all) {
+            if (info.category != cat.category) {
+                continue;
+            }
+            text += QStringLiteral("\n· %1\n").arg(info.title);
+            text += QStringLiteral("  是什么：%1\n").arg(info.purpose);
+            text += QStringLiteral("  怎么用：%1\n").arg(info.howToUse);
+            text += QStringLiteral("  提示：%1\n").arg(info.tips);
+        }
+        text += QStringLiteral("\n");
+    }
+    text += QStringLiteral("\n") + GuideSafetyNote() + QStringLiteral("\n");
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("空间工具箱 · 导览"));
+    dialog.resize(720, 600);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(16, 14, 16, 14);
+    layout->setSpacing(10);
+
+    auto* textEdit = new QTextEdit(&dialog);
+    textEdit->setReadOnly(true);
+    textEdit->setPlainText(text);
+    textEdit->setLineWrapMode(QTextEdit::WidgetWidth);
+    layout->addWidget(textEdit, 1);
+
+    auto* buttons = new QDialogButtonBox(&dialog);
+    QPushButton* copyButton = buttons->addButton(QStringLiteral("复制"), QDialogButtonBox::ActionRole);
+    QPushButton* closeButton = buttons->addButton(QStringLiteral("关闭"), QDialogButtonBox::RejectRole);
+    closeButton->setDefault(true);
+    connect(copyButton, &QPushButton::clicked, &dialog, [text]() {
+        if (QApplication::clipboard() != nullptr) {
+            QApplication::clipboard()->setText(text);
+        }
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    dialog.exec();
 }
 
 void FeatureHubWidget::ShowActionPlan() {

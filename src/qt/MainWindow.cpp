@@ -5306,6 +5306,59 @@ void MainWindow::ApplyStyle() {
         QLabel#CleanupStatus {
             color: @textSecondary;
         }
+
+        /* 空间工具箱:首次向导条 */
+        QFrame#OnboardingBanner {
+            background: @accentSoft;
+            border: 1px solid @accentSoftBorder;
+            border-radius: @cardRadius;
+        }
+        QLabel#OnboardingTitle {
+            color: @accent;
+            font-size: @fsLabel;
+            font-weight: 700;
+        }
+        QLabel#OnboardingBody {
+            color: @textSecondary;
+        }
+        QPushButton#OnboardingDismiss {
+            background: @accent;
+            border: 1px solid @accentDeep;
+            color: @accentContrastText;
+            border-radius: @controlRadius;
+            padding: 4px 18px;
+            font-weight: 600;
+        }
+        QPushButton#OnboardingDismiss:hover {
+            background: @accentHover;
+        }
+
+        /* 空间工具箱:模块说明面板(是什么/怎么用/提示) */
+        QFrame#ModuleGuide {
+            background: @cardBg;
+            border: 1px solid @cardBorder;
+            border-radius: @controlRadius;
+        }
+        QLabel#ModuleGuidePurpose {
+            color: @textPrimary;
+            font-weight: 600;
+        }
+        QLabel#ModuleGuideHowTo {
+            color: @textSecondary;
+        }
+        QLabel#ModuleGuideTips {
+            color: @textMuted;
+        }
+
+        /* 空间工具箱:分组模块列表(独立于主目录树 #DirectoryTree) */
+        QListWidget#ModuleList {
+            background: @cardBg;
+            border: 1px solid @cardBorder;
+            border-radius: @controlRadius;
+        }
+        QListWidget#ModuleList::item {
+            padding: 3px 4px;
+        }
         QLabel#CleanupTotal {
             color: @accent;
             font-size: @fsLabel;
